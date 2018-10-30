@@ -1,8 +1,10 @@
-**CMU 15-618 Fall 2018 - Final Project Proposal**
-
 # Parallelized Generation and Smoothing of 2D Contour Lines
 
-*Dan Mahr (dmahr) and Justin Wang (jcwang1)*
+**CMU 15-618 Fall 2018 - Final Project Proposal**
+
+**Dan Mahr (dmahr) and Justin Wang (jcwang1)**
+
+[https://dmahr1.github.io/618-final/proposal.html](https://dmahr1.github.io/618-final/proposal.html)
 
 ## Summary
 
@@ -57,7 +59,7 @@ To generate a set of test cases of varying size, we will mosaic digital elevatio
 
 - **Goal 5:** Refactor working code to GDAL’s API and specifications and submit a pull request to merge it with the existing codebase. This is a stretch goal that we hope to achieve if time allows.
 
-Demo: During the poster session, we will chart speedup and visualize contour lines for a number of inputs, perhaps with on-the-fly contour line generation for areas within Pittsburgh. We could also have a “taste test” where users compare the non-smoothed and smoothed contour lines.
+- **Demo**: During the poster session, we will chart speedup and visualize contour lines for a number of inputs, perhaps with on-the-fly contour line generation for areas within Pittsburgh. We could also have a “taste test” where users compare the non-smoothed and smoothed contour lines.
 
 ## Platform
 
