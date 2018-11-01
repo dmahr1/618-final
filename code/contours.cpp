@@ -8,11 +8,13 @@ int main(int argc, char **argv) {
     
     float *input_array = (float *) malloc(nrows * ncols * sizeof(float));
 
-    int val;
+    printf("rows: %d, cols: %d\n", nrows, ncols);
+
+    float val;
     int index = 0;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
-            scanf("%d", &val);
+            scanf("%f", &val);
             input_array[index] = val;
             index += 1;
         }
