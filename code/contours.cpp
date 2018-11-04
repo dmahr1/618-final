@@ -20,6 +20,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    int i;
+    #pragma omp parallel private(i)
+    {
+        #pragma omp for
+        for (i = 0; i < nrows; i++) {
+            for (int j = 0; j < ncols; j++) {
+                input_array[i * ncols + j] *= 2;
+            }
+        }
+    }
+
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
             printf("%.2f ", input_array[i * ncols + j]);
