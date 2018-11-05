@@ -15,9 +15,13 @@ typedef struct {
 } Point;
 
 typedef struct {
-    Point start;
+    int end_side_id;
     Point end;
     bool visited;
+
+    // TODO: Consider how necesary this is in the future.
+    int start_side_id;
+    Point start;
 } Segment;
 
 typedef struct {
@@ -37,11 +41,20 @@ constexpr uint8_t NE_ABOVE = 4;
 constexpr uint8_t SE_ABOVE = 2;
 constexpr uint8_t SW_ABOVE = 1;
 
+enum class Sides {TOP, BOTTOM, LEFT, RIGHT};
+
 double interpolate(double low, double high, double level) {
     return 0.0;
 };
 
-Square createSquare(int row, int col, const std::vector<double>& levels) {
+// TODO: implement this.
+int computeSideId(const int row, const int col, Sides side) {
+    return 0;
+}
+
+void processSquare(const int row, const int col, const std::vector<double>& levels,
+        std::vector<std::unordered_map<int, Segment>> *segment_maps,
+        std::vector<std::vector<Segment>> *boundary_segments) {
     assert(row < nrows - 1);
     assert(col < ncols - 1);
 
@@ -59,7 +72,8 @@ Square createSquare(int row, int col, const std::vector<double>& levels) {
 
     Square square = {row, col, {}};
 
-    for (auto& level : levels) {
+    for (int level_index = 0; level_index < levels.size(); level_index++) {
+        double level = levels[level_index];
         // Skip levels that are totally below or totally above this pixel.
         if (level < pixel_min || level > pixel_max) {
             continue;
@@ -67,7 +81,7 @@ Square createSquare(int row, int col, const std::vector<double>& levels) {
 
         uint8_t key = 0;
 
-        // TODO: figure out right thing to do regarding tolerance
+        // TODO: figure out if this is right thing to do regarding tolerance?
         if (nw > level) {
             key |= NW_ABOVE;
         }
@@ -86,10 +100,20 @@ Square createSquare(int row, int col, const std::vector<double>& levels) {
         segment1.visited = false;
         double row_f = (double) row;
         double col_f = (double) col;
+        // TODO(long-term): Think about how to refactor / clean up this.
         switch(key) {
+            // Need to add 0.5 since the points we interpolate between are actually centers of squares.
             case 1:
-                segment0.start = {col_f, row_f + interpolate(nw, sw, level)};
-                segment0.end = {col_f + interpolate(se, sw, level), row_f + 1};
+                segment0.start = {col_f + 0.5, row_f + 0.5 + interpolate(nw, sw, level)};
+                segment0.start_side_id = computeSideId(row, col, Sides::LEFT);
+                // If left side of this square is a border, then this is a start segment.
+                if (col == 0) {
+                    (*boundary_segments)[level_index].push_back(segment0);
+                }
+
+                segment0.end = {col_f + 0.5 + interpolate(se, sw, level), row_f + 1 + 0.5};
+                segment0.end_side_id = computeSideId(row, col, Sides::BOTTOM);
+                (*segment_maps)[level_index].insert({segment0.start_side_id, segment0});
                 break;
             case 2:
                 segment0.start = {col_f + interpolate(se, sw, level), row_f + 1};
@@ -105,67 +129,47 @@ Square createSquare(int row, int col, const std::vector<double>& levels) {
     }
 }
 
-Contour traverseSquares(Square *squares, double level, Square *square,
-        Segment starting_segment) {
-    Contour contour;
-    contour.level = level;
+// TODO: check that compiler will do return value optimization, or else pass in
+// the vector so that it may be populated in place.
+std::vector<Point> traverseSegments(std::unordered_map<int, Segment>* segment_map,
+        Segment start_segment) {
+    Segment current_segment = start_segment;
+    std::vector<Point> line_string;
 
-    Segment current_segment = starting_segment;
-    contour.line_string.push_back(current_segment.start);
-    contour.line_string.push_back(current_segment.end);
+    line_string.push_back(current_segment.start);
+    line_string.push_back(current_segment.end);
 
-    // Mark the actual original segment as visited.
-    // While (true)
-    // | Figure out (row, column) of next square implied by current segment.
-    // | If square is out of bounds, return the existing contour.
-    // | Else, determine next square's segment implied by current segment.
-    // | If segment unvisited, add end point to line_string.
-    // | Mark segent as visited.
-    return contour;
+    // Don't think we can directly modify start_segment since it's a different copy.
+    // So we have to this weird thing where use a segment to look up "itself".
+    // Idea is that segment_map should be the single source of truth of whether
+    // a segment has been visited or not.
+    segment_map->at(current_segment.start_side_id).visited = true;
+
+    while(segment_map->count(current_segment.end_side_id) > 0 &&
+            segment_map->at(current_segment.end_side_id).visited == false) {
+        // Go to the next segment (the one that starts from the current end side).
+        current_segment = segment_map->at(current_segment.end_side_id);
+        current_segment.visited = true;
+        line_string.push_back(current_segment.end);
+    }
+    return line_string;
 }
 
-void traverseNonClosedContours(Square *squares, double level,
-        std::vector<Contour> *contours) {
-    // Top
-    for (int col = 0; col < ncols - 1; col++) {
-        Square square = squares[col];
-        auto iter = square.segments.find(level);
-        if (iter != square.segments.end()) {
-            continue;
-        }
-
-        for (auto segment : iter->second) {
-            if (segment.start.y == 0.0) {
-                Contour contour = traverseSquares(squares, level, &square, segment);
-                contour.is_closed = false;
-            }
-        }
+void traverseNonClosedContours(std::unordered_map<int, Segment>* segment_map, 
+        std::vector<Segment> start_segments, double level, std::vector<Contour> *contours) {
+    for (auto& start_segment : start_segments) {
+        Contour contour;
+        contour.line_string = traverseSegments(segment_map, start_segment);
+        contour.is_closed = false;
+        contour.level = level;
+        contours->push_back(contour);
     }
-
-    for (int row = 0; row < nrows - 1; row++) {
-        Square square = squares[row * ncols + ncols - 1];
-        auto iter = square.segments.find(level);
-        if (iter != square.segments.end()) {
-            continue;
-        }
-
-        for (const auto& segment : iter->second) {
-            if (segment.start.x == ncols - 1) {
-                // Start traversing
-            }
-        }
-    }
-    //
-    // Right
-    //
-    // Bottom
-    //
-    // Left
-
+    return;
 }
 
 void traverseClosedContours(Square *squares, double level,
     std::vector<Contour> *contours) {
+    return;
 }
 
 int main(int argc, char **argv) {
@@ -185,18 +189,22 @@ int main(int argc, char **argv) {
         }
     }
 
-    Square *squares = (Square *) malloc(nrows * ncols * sizeof(Square));
     std::vector<double> levels = {0.0, 5.0, 10.0};
+    // Global segment map. The ith map is for isovalue levels[i].
+    std::vector<std::unordered_map<int, Segment>> segment_maps(levels.size());
+    // We can tell at processing time whether a segment should be the starting point for a traversal
+    // of a non-closed segment. Save them here.
+    std::vector<std::vector<Segment>> boundary_segments;
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
-            squares[i * ncols + j] = createSquare(i, j, levels);
+            processSquare(i, j, levels, &segment_maps, &boundary_segments);
         }
     }
 
     std::vector<Contour> contours;
-    for (auto& level : levels) {
-        traverseNonClosedContours(squares, level, &contours);
-        traverseClosedContours(squares, level, &contours);
+    for (int i = 0; i < levels.size(); i++) {
+        traverseNonClosedContours(&segment_maps[i], boundary_segments[i], levels[i], &contours);
+        //traverseClosedContours(squares, level, &contours);
     }
 
 
