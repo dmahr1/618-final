@@ -1,0 +1,15 @@
+# ignore files without extensions
+*
+!*.*
+!*/
+
+# ignore binaries
+*.o
+*.class
+*.d
+
+# ignore documents and IDE stuff
+*.gdoc
+settings.json
+.vscode/*
+
