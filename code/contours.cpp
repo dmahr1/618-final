@@ -6,198 +6,393 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-int nrows, ncols;
-float *input_array;
+// Constants and enumerations
+enum class Side {TOP, BOTTOM, LEFT, RIGHT, ANY};
+constexpr uint8_t UL_ABOVE = 8;
+constexpr uint8_t UR_ABOVE = 4;
+constexpr uint8_t LR_ABOVE = 2;
+constexpr uint8_t LL_ABOVE = 1;
+
+// Structs and typedefs
+typedef double val_t;
+typedef double coord_t;
 
 typedef struct {
-    double x;
-    double y;
+    coord_t x;
+    coord_t y;
 } Point;
 
 typedef struct {
     Point start;
     Point end;
+    Side start_side;
+    Side end_side;
     bool visited;
 } Segment;
 
 typedef struct {
+    std::unordered_multimap<val_t, Segment> segments;
     int row;
     int col;
-    std::unordered_map<double, std::vector<Segment>> segments;
 } Square;
 
 typedef struct {
-    double level;
-    bool is_closed;
     std::vector<Point> line_string;
+    val_t level;
+    bool is_closed;
 } Contour;
 
-constexpr uint8_t NW_ABOVE = 8;
-constexpr uint8_t NE_ABOVE = 4;
-constexpr uint8_t SE_ABOVE = 2;
-constexpr uint8_t SW_ABOVE = 1;
+// Globals
+int nrows, ncols;
+val_t *input_array;
+Square *squares;
 
-double interpolate(double low, double high, double level) {
-    return 0.0;
+void printContour(const Contour& contour) {
+    printf("level: %.2f, closed: %d\n", contour.level, contour.is_closed);
+    int i;
+    printf("LINESTRING (");
+    for (i = 0; i < contour.line_string.size() - 1; i++) {
+        printf("%.2f %.2f, ", contour.line_string[i].x, contour.line_string[i].y);
+    }
+    printf("%.2f %.2f)\n", contour.line_string[i].x, contour.line_string[i].y);
+}
+
+void printGeoJSON(const std::vector<Contour *> contours) {
+    printf("{ \"type\":\"FeatureCollection\", \"features\": [\n");
+    int i;
+    for (i = 0; i < contours.size(); i++) {
+        Contour *contour = contours[i];
+        printf("{ \"type\":\"Feature\", ");
+        printf("\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
+                contour->level, (contour->is_closed) ? "true" : "false");
+        printf("\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
+        int j;
+        for (j = 0; j < contour->line_string.size() - 1; j++) {
+            Point pt = contour->line_string[j];
+            printf("[%.4f,%.4f],", pt.x, pt.y);
+        }
+        Point pt = contour->line_string[j];
+        printf("[%.4f,%.4f] ] } }", pt.x, pt.y);
+        printf("%s\n", (i < contours.size() - 1) ? "," : "");
+    }
+    printf("] } \n");
+}
+
+inline val_t interpolate(val_t left_or_top, val_t right_or_bottom, val_t level) {
+    // Return the coordinate at level linearly proportional between top/left and bottom/right
+    // TODO(maybe): do we need to be careful about tolerance?
+    val_t ret = (level - left_or_top) / (right_or_bottom - left_or_top);
+    assert(ret >= 0);
+    return ret;
 };
 
-Square createSquare(int row, int col, const std::vector<double>& levels) {
-    assert(row < nrows - 1);
-    assert(col < ncols - 1);
+inline Point interpolatePoint(Side side, val_t level, coord_t top, coord_t left,
+        val_t val_ll, val_t val_lr, val_t val_ur, val_t val_ul) {
+    switch(side) {
+        case Side::LEFT:
+            return {left,  top + interpolate(val_ul, val_ll, level)};
+        case Side::RIGHT:
+            return {left + 1.0, top + interpolate(val_ur, val_lr, level)};
+        case Side::TOP:
+            return {left + interpolate(val_ul, val_ur, level), top};
+        case Side::BOTTOM:
+            return {left + interpolate(val_ll, val_lr, level), top + 1.0};
+    }
+    assert(false);
+}
 
-    // nw = northwest, ...
-    double nw, ne, se, sw;
+inline Segment buildSegment(Side side_start, Side side_end, val_t level, coord_t top, coord_t left,
+        val_t val_ll, val_t val_lr, val_t val_ur, val_t val_ul) {
+    Segment segment;
+    segment.visited = false;
+    segment.start_side = side_start;
+    segment.end_side = side_end;
+    segment.start = interpolatePoint(side_start, level, top, left, val_ll, val_lr, val_ur, val_ul);
+    segment.end = interpolatePoint(side_end, level, top, left, val_ll, val_lr, val_ur, val_ul);
+    return segment;
+}
 
-    nw = input_array[row * ncols + col];
-    ne = input_array[row * ncols + col + 1];
-    se = input_array[(row + 1) * ncols + col + 1];
-    sw = input_array[(row + 1) * ncols + col];
+void createSquare(Square *square, int row, int col, const std::vector<val_t>& levels) {
+    assert(row < nrows - 1 && col < ncols - 1);
+    square->row = row;
+    square->col = col;
 
-    double pixel_min, pixel_max;
-    pixel_min = std::min(nw, std::min(ne, std::min(se, sw)));
-    pixel_max = std::max(nw, std::max(ne, std::max(se, sw)));
+    // Get pixel values at corners around this square
+    val_t val_ll = input_array[(row + 1) * ncols + col];
+    val_t val_lr = input_array[(row + 1) * ncols + col + 1];
+    val_t val_ur = input_array[row * ncols + col + 1];
+    val_t val_ul = input_array[row * ncols + col];
+    val_t pixel_min = std::min(val_ll, std::min(val_lr, std::min(val_ur, val_ul)));
+    val_t pixel_max = std::max(val_ll, std::max(val_lr, std::max(val_ur, val_ul)));
 
-    Square square = {row, col, {}};
-
+    // Iterate over all levels, skipping those that are out of range for these pixels
     for (auto& level : levels) {
-        // Skip levels that are totally below or totally above this pixel.
         if (level < pixel_min || level > pixel_max) {
             continue;
         }
-    
+        // TODO: figure out if this is right thing to do regarding tolerance?
         uint8_t key = 0;
-        
-        // TODO: figure out right thing to do regarding tolerance
-        if (nw > level) {
-            key |= NW_ABOVE;
-        }
-        if (ne > level) {
-            key |= NE_ABOVE;
-        }
-        if (se > level) {
-            key |= SE_ABOVE;
-        }
-        if (sw > level) {
-            key |= SW_ABOVE;
-        }
+        key |= (val_ll > level) ? LL_ABOVE : 0;
+        key |= (val_lr > level) ? LR_ABOVE : 0;
+        key |= (val_ur > level) ? UR_ABOVE : 0;
+        key |= (val_ul > level) ? UL_ABOVE : 0;
 
-        Segment segment0, segment1;
-        segment0.visited = false;
-        segment1.visited = false;
-        double row_f = (double) row;
-        double col_f = (double) col;
+        // We define the upper-left pixel to be the point at coordinates (row,col)
+        // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669
+        coord_t top = (coord_t) row;
+        coord_t left = (coord_t) col;
+>>>>>>> no_indirection_layer
+
         switch(key) {
-            case 1:
-                segment0.start = {col_f, row_f + interpolate(nw, sw, level)};
-                segment0.end = {col_f + interpolate(se, sw, level), row_f + 1};
+            // Cases where 1 pixel is above the level
+            case (LL_ABOVE): // Case 1 = 0001
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            case 2:
-                segment0.start = {col_f + interpolate(se, sw, level), row_f + 1};
-                segment0.end = {col_f + 1, row_f + interpolate(ne, se, level)};
+            case (LR_ABOVE): // Case 2 = 0010
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-                
-            // Remember to disambiguate the saddles.
-
+            case (UR_ABOVE): // Case  4 = 0100
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE): // Case  8 = 1000
+                square->segments.insert({level, buildSegment(Side::TOP, Side::LEFT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            // Cases where 3 pixels are above the level
+            case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
+                square->segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            // Cases where 2 adjacent pixels are above the level
+            case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
+                square->segments.insert({level, buildSegment(Side::TOP, Side::BOTTOM,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::LEFT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            // TODO(maybe): disambiguate saddle points.
+            // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
+            case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
+                square->segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            // Should never reach here
             default:
-                break;
-                // Raise an error.
+                assert(false);
         }
     }
 }
 
-Contour traverseSquares(Square *squares, double level, Square *square,
-        Segment starting_segment) {
-    Contour contour;
-    contour.level = level;
+// Find (unvisited) segment at given level starting from given side in given square
+bool lookupSegmentInSquare(Segment **segment, val_t level, Square *square, Side start_side,
+        bool unvisited_only) {
+    int num_segments_found = 0;
+    auto range = square->segments.equal_range(level);
+    for (auto iter = range.first; iter != range.second; iter++) {
+        if ((start_side == Side::ANY || iter->second.start_side == start_side) &&
+                (!unvisited_only || iter->second.visited == false)) {
+            *segment = &(iter->second);
+            num_segments_found++;
+        }
+    }
+    assert(num_segments_found <= 1); // Should never have 2+ segments with same square/level/side
+    return num_segments_found == 1;
+}
 
-    Segment current_segment = starting_segment;
-    contour.line_string.push_back(current_segment.start);
-    contour.line_string.push_back(current_segment.end);
+// Go from segment at level in square to next segment, updating points in-place
+bool traverseToNextSegment(Square **square, Segment **segment, val_t level) {
 
-    // Mark the actual original segment as visited.
-    // While (true)
-    // | Figure out (row, column) of next square implied by current segment.
-    // | If square is out of bounds, return the existing contour.
-    // | Else, determine next square's segment implied by current segment.
-    // | If segment unvisited, add end point to line_string.
-    // | Mark segent as visited.
+    // Traverse left
+    if ((*segment)->end_side == Side::LEFT && (*square)->col > 0) {
+        *square = &squares[(*square)->row * ncols + (*square)->col - 1];
+        return lookupSegmentInSquare(segment, level, *square, Side::RIGHT, true);
+    // Traverse right
+    } else if ((*segment)->end_side == Side::RIGHT && (*square)->col < ncols - 1) {
+        *square = &squares[(*square)->row * ncols + (*square)->col + 1];
+        return lookupSegmentInSquare(segment, level, *square, Side::LEFT, true);
+    // Traverse up
+    } else if ((*segment)->end_side == Side::TOP && (*square)->row > 0) {
+        *square = &squares[((*square)->row - 1) * ncols + (*square)->col];
+        return lookupSegmentInSquare(segment, level, *square, Side::BOTTOM, true);
+    // Traverse down
+    } else if ((*segment)->end_side == Side::BOTTOM && (*square)->row < nrows - 1) {
+        *square = &squares[((*square)->row + 1) * ncols + (*square)->col];
+        return lookupSegmentInSquare(segment, level, *square, Side::TOP, true);
+    // Hit the edge of the raster, can't go any farther!
+    } else {
+        return false;
+    }
+
+}
+
+Contour* traverseContour(val_t level, Square *starting_square, Segment *starting_segment) {
+
+    // Initialize the contour with the first two vertices
+    Contour *contour = new Contour();
+    contour->level = level;
+    contour->line_string.push_back(starting_segment->start);
+    contour->line_string.push_back(starting_segment->end);
+    starting_segment->visited = true;
+
+    // Traverse through all connected segments
+    Square *current_square = starting_square;
+    Segment *current_segment = starting_segment;
+    while (traverseToNextSegment(&current_square, &current_segment, level)) {
+        contour->line_string.push_back(current_segment->end);
+        current_segment->visited = true;
+    }
+
     return contour;
 }
 
-void traverseNonClosedContours(Square *squares, double level, 
-        std::vector<Contour> *contours) {
-    // Top
-    for (int col = 0; col < ncols - 1; col++) {
-        Square square = squares[col];
-        auto iter = square.segments.find(level);
-        if (iter != square.end()) {
-            continue;
-        }
-
-        for (const auto& segment : iter->second) {
-            if (segment.start.y == 0.0) {
-                Contour contour = traverseSquares(squares, level, segment);
-                contour.is_closed = false;
-            }
+void traverseNonClosedContours(val_t level, std::vector<Contour*> *contours) {
+    Segment *segment;
+    int row = 0, col = 0;
+    // Check squares in top row, exclusive of square in rightmost column
+    for (; col < ncols - 2; col++) {
+        Square *square = &squares[row * ncols + col];
+        if (lookupSegmentInSquare(&segment, level, square, Side::TOP, true)) {
+            Contour *contour = traverseContour(level, square, segment);
+            contour->is_closed = false;
+            contours->push_back(contour);
         }
     }
-
-    for (int row = 0; row < nrows - 1; row++) {
-        Square square = squares[row * ncols + ncols - 1];
-        auto iter = square.segments.find(level);
-        if (iter != square.end()) {
-            continue;
-        }
-
-        for (const auto& segment : iter->second) {
-            if (segment.start.x == ncols - 1) {
-                // Start traversing
-            }
+    // Check squares in right column, exclusive of square in bottom row
+    for (; row < nrows - 2; row++) {
+        Square *square = &squares[row * ncols + col];
+        if (lookupSegmentInSquare(&segment, level, square, Side::RIGHT, true)) {
+            Contour *contour = traverseContour(level, square, segment);
+            contour->is_closed = false;
+            contours->push_back(contour);
         }
     }
-    //
-    // Right
-    //
-    // Bottom
-    //
-    // Left
-
+    // Check squares in bottom row, exclusive of square in leftmost column
+    for (; col > 0; col--) {
+        Square *square = &squares[row * ncols + col];
+        if (lookupSegmentInSquare(&segment, level, square, Side::BOTTOM, true)) {
+            Contour *contour = traverseContour(level, square, segment);
+            contour->is_closed = false;
+            contours->push_back(contour);
+        }
+    }
+    // Check squares in left column, exclusive of square in top row
+    for (; row > 0; row--) {
+        Square *square = &squares[row * ncols + col];
+        if (lookupSegmentInSquare(&segment, level, square, Side::LEFT, true)) {
+            Contour *contour = traverseContour(level, square, segment);
+            contour->is_closed = false;
+            contours->push_back(contour);
+        }
+    }
 }
 
-void traverseClosedContours(Square *squares, double level) {
+void traverseClosedContours(val_t level, std::vector<Contour*> *contours) {
+    // Iterate over all squares, begin traversal at any unvisited segments
+    for (int row = 0; row < nrows; row++) {
+        for (int col = 0; col < ncols; col++) {
+            Square *square = &squares[row * ncols + col];
+            Segment *segment;
+            if (lookupSegmentInSquare(&segment, level, square, Side::ANY, true)) {
+                Contour *contour = traverseContour(level, square, segment);
+                contour->is_closed = true;
+                contours->push_back(contour);
+            }
+        }
+    }
+}
+
+void countSegments(int *total_segments = nullptr, int *unvisited_segments = nullptr) {
+    int total = 0, unvisited = 0;
+    Square *square;
+    Segment *segment;
+    for (int row = 0; row < nrows; row++) {
+        for (int col = 0; col < ncols; col++) {
+            Square *square = &squares[row * ncols + col];
+            for (auto iter = square->segments.begin(); iter != square->segments.end(); iter++) {
+                total++;
+                if (iter->second.visited == false) {
+                    unvisited++;
+                }
+            }
+        }
+    }
+    if (total_segments != nullptr && unvisited_segments != nullptr) {
+        *total_segments = total;
+        *unvisited_segments = unvisited;
+    } else {
+        float percent = ((float) total) / ((float) unvisited);
+        printf("Found %i segments, %i (%.2f%%) are unvisited.\n", total, unvisited, percent);
+    }
 }
 
 int main(int argc, char **argv) {
+
+    // Initialize data structures that are proportional to the raster size
     scanf("%d %d", &nrows, &ncols);
-    
-    input_array = (float *) malloc(nrows * ncols * sizeof(float));
+    input_array = new val_t[nrows * ncols];
+    squares = new Square[nrows * ncols];
+    // printf("rows: %d, cols: %d\n", nrows, ncols);
 
-    printf("rows: %d, cols: %d\n", nrows, ncols);
-
-    float val;
+    // Populate the input data array
+    val_t val;
     int index = 0;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
-            scanf("%f", &val);
+            scanf("%lf", &val);
             input_array[index] = val;
             index += 1;
         }
     }
 
-    Square *squares = (Square *) malloc(nrows * ncols * sizeof(Square));
-    std::vector<double> levels = {0.0, 5.0, 10.0};
+    // Phase 1: generate segments in each square (in parallel)
+    std::vector<val_t> levels = {75.0, 150.0};
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
-            squares[i * ncols + j] = createSquare(i, j, levels);
+            createSquare(&squares[i * ncols + j], i, j, levels);
         }
     }
 
-    std::vector<Contour> contours;
+    // Phase 2: join adjacent segments into contours
+    std::vector<Contour *> contours;
     for (auto& level : levels) {
-        traverseNonClosedContours(squares, levels, &contours);
-        traverseClosedContours(squares, levels, &contours);
+        traverseNonClosedContours(level, &contours);
+        traverseClosedContours(level, &contours);
     }
 
+    printGeoJSON(contours);
 
     return 0;
 }
