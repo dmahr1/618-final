@@ -44,9 +44,19 @@ int nrows, ncols;
 float *input_array;
 Square *squares;
 
+void printContour(const Contour& contour) {
+    printf("level: %.2f, closed: %d\n", contour.level, contour.is_closed);
+    int i;
+    printf("LINESTRING (");
+    for (i = 0; i < contour.line_string.size() - 1; i++) {
+        printf("%.2f %.2f, ", contour.line_string[i].x, contour.line_string[i].y);
+    }
+    printf("%.2f %.2f)\n", contour.line_string[i].x, contour.line_string[i].y);
+}
 
 inline double interpolate(double left_or_top, double right_or_bottom, double level) {
     // Return the coordinate at level linearly proportional between top/left and bottom/right
+    // TODO(maybe): do we need to be careful about tolerance?
     double ret = (level - left_or_top) / (right_or_bottom - left_or_top);
     assert(ret >= 0);
     return ret;
@@ -69,7 +79,6 @@ inline Point interpolatePoint(Side side, double level, double top, double left,
 
 inline Segment buildSegment(Side side_start, Side side_end, double level, double top, double left,
         double val_ll, double val_lr, double val_ur, double val_ul) {
-
     Segment segment;
     segment.visited = false;
     segment.start_side = side_start;
@@ -77,13 +86,12 @@ inline Segment buildSegment(Side side_start, Side side_end, double level, double
     segment.start = interpolatePoint(side_start, level, top, left, val_ll, val_lr, val_ur, val_ul);
     segment.end = interpolatePoint(side_end, level, top, left, val_ll, val_lr, val_ur, val_ul);
     return segment;
-
 }
 
-void createSquare(Square &square, int row, int col, const std::vector<double>& levels) {
+void createSquare(Square *square, int row, int col, const std::vector<double>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
-    square.row = row;
-    square.col = col;
+    square->row = row;
+    square->col = col;
 
     // Get pixel values at corners around this square
     double val_ll = input_array[(row + 1) * ncols + col];
@@ -114,66 +122,67 @@ void createSquare(Square &square, int row, int col, const std::vector<double>& l
         switch(key) {
             // Cases where 1 pixel is above the level
             case (LL_ABOVE): // Case 1 = 0001
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (LR_ABOVE): // Case 2 = 0010
-                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::RIGHT,
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::RIGHT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UR_ABOVE): // Case  4 = 0100
-                square.segments.insert({level, buildSegment(Side::RIGHT, Side::TOP,
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::TOP,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE): // Case  8 = 1000
-                square.segments.insert({level, buildSegment(Side::TOP, Side::LEFT,
+                square->segments.insert({level, buildSegment(Side::TOP, Side::LEFT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             // Cases where 3 pixels are above the level
             case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
-                square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                square->segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
-                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             // Cases where 2 adjacent pixels are above the level
             case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
-                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::TOP,
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::TOP,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
-                square.segments.insert({level, buildSegment(Side::TOP, Side::BOTTOM,
+                square->segments.insert({level, buildSegment(Side::TOP, Side::BOTTOM,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::LEFT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
+            // TODO(maybe): disambiguate saddle points.
             // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
             case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                square->segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
-                square.segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
+                square->segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
-                square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                square->segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
-                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                square->segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
             // Should never reach here
@@ -345,10 +354,10 @@ int main(int argc, char **argv) {
     }
 
     // Phase 1: generate segments in each square (in parallel)
-    std::vector<double> levels = {0.0, 5.0, 10.0};
+    std::vector<double> levels = {180.0, 185.0, 190.0, 195.0};
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
-            createSquare(squares[i * ncols + j], i, j, levels);
+            createSquare(&squares[i * ncols + j], i, j, levels);
         }
     }
     countSegments();
@@ -360,6 +369,10 @@ int main(int argc, char **argv) {
         traverseClosedContours(level, &contours);
     }
     countSegments();
+    printf("%d contours found\n", (int) contours.size());
+    for (const auto& contour : contours) {
+        printContour(*contour);
+    }
 
     return 0;
 }
