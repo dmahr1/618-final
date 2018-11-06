@@ -57,6 +57,27 @@ void printContour(const Contour& contour) {
     printf("%.2f %.2f)\n", contour.line_string[i].x, contour.line_string[i].y);
 }
 
+void printGeoJSON(const std::vector<Contour *> contours) {
+    printf("{ \"type\":\"FeatureCollection\", \"features\": [\n");
+    int i;
+    for (i = 0; i < contours.size(); i++) {
+        Contour *contour = contours[i];
+        printf("{ \"type\":\"Feature\", ");
+        printf("\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
+                contour->level, (contour->is_closed) ? "true" : "false");
+        printf("\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
+        int j;
+        for (j = 0; j < contour->line_string.size() - 1; j++) {
+            Point pt = contour->line_string[j];
+            printf("[%.4f,%.4f],", pt.x, pt.y);
+        }
+        Point pt = contour->line_string[j];
+        printf("[%.4f,%.4f] ] } }", pt.x, pt.y);
+        printf("%s\n", (i < contours.size() - 1) ? "," : "");
+    }
+    printf("] } \n");
+}
+
 inline val_t interpolate(val_t left_or_top, val_t right_or_bottom, val_t level) {
     // Return the coordinate at level linearly proportional between top/left and bottom/right
     // TODO(maybe): do we need to be careful about tolerance?
@@ -343,7 +364,7 @@ int main(int argc, char **argv) {
     scanf("%d %d", &nrows, &ncols);
     input_array = new val_t[nrows * ncols];
     squares = new Square[nrows * ncols];
-    printf("rows: %d, cols: %d\n", nrows, ncols);
+    // printf("rows: %d, cols: %d\n", nrows, ncols);
 
     // Populate the input data array
     val_t val;
@@ -363,7 +384,6 @@ int main(int argc, char **argv) {
             createSquare(&squares[i * ncols + j], i, j, levels);
         }
     }
-    countSegments();
 
     // Phase 2: join adjacent segments into contours
     std::vector<Contour *> contours;
@@ -371,11 +391,8 @@ int main(int argc, char **argv) {
         traverseNonClosedContours(level, &contours);
         traverseClosedContours(level, &contours);
     }
-    countSegments();
-    printf("%d contours found\n", (int) contours.size());
-    for (const auto& contour : contours) {
-        printContour(*contour);
-    }
+
+    printGeoJSON(contours);
 
     return 0;
 }
