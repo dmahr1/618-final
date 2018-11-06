@@ -53,7 +53,7 @@ inline double interpolate(double left_or_top, double right_or_bottom, double lev
 };
 
 inline Point interpolatePoint(Side side, double level, double top, double left,
-        double val_ul, double val_ur, double val_lr, double val_ll) {
+        double val_ll, double val_lr, double val_ur, double val_ul) {
     switch(side) {
         case Side::LEFT:
             return {left,  top + interpolate(val_ul, val_ll, level)};
@@ -68,14 +68,14 @@ inline Point interpolatePoint(Side side, double level, double top, double left,
 }
 
 inline Segment buildSegment(Side side_start, Side side_end, double level, double top, double left,
-        double val_ul, double val_ur, double val_lr, double val_ll) {
+        double val_ll, double val_lr, double val_ur, double val_ul) {
 
     Segment segment;
     segment.visited = false;
     segment.start_side = side_start;
     segment.end_side = side_end;
-    segment.start = interpolatePoint(side_start, level, top, left, val_ul, val_ur, val_lr, val_ll);
-    segment.end = interpolatePoint(side_end, level, top, left, val_ul, val_ur, val_lr, val_ll);
+    segment.start = interpolatePoint(side_start, level, top, left, val_ll, val_lr, val_ur, val_ul);
+    segment.end = interpolatePoint(side_end, level, top, left, val_ll, val_lr, val_ur, val_ul);
     return segment;
 
 }
@@ -86,12 +86,12 @@ void createSquare(Square &square, int row, int col, const std::vector<double>& l
     square.col = col;
 
     // Get pixel values at corners around this square
-    double val_ul = input_array[row * ncols + col];
-    double val_ur = input_array[row * ncols + col + 1];
-    double val_lr = input_array[(row + 1) * ncols + col + 1];
     double val_ll = input_array[(row + 1) * ncols + col];
-    double pixel_min = std::min(val_ul, std::min(val_ur, std::min(val_lr, val_ll)));
-    double pixel_max = std::max(val_ul, std::max(val_ur, std::max(val_lr, val_ll)));
+    double val_lr = input_array[(row + 1) * ncols + col + 1];
+    double val_ur = input_array[row * ncols + col + 1];
+    double val_ul = input_array[row * ncols + col];
+    double pixel_min = std::min(val_ll, std::min(val_lr, std::min(val_ur, val_ul)));
+    double pixel_max = std::max(val_ll, std::max(val_lr, std::max(val_ur, val_ul)));
 
     // Iterate over all levels, skipping those that are out of range for these pixels
     for (auto& level : levels) {
@@ -101,10 +101,10 @@ void createSquare(Square &square, int row, int col, const std::vector<double>& l
 
         // TODO: figure out if this is right thing to do regarding tolerance?
         uint8_t key = 0;
-        key |= (val_ul > level) ? UL_ABOVE : 0;
-        key |= (val_ur > level) ? UR_ABOVE : 0;
-        key |= (val_lr > level) ? LR_ABOVE : 0;
         key |= (val_ll > level) ? LL_ABOVE : 0;
+        key |= (val_lr > level) ? LR_ABOVE : 0;
+        key |= (val_ur > level) ? UR_ABOVE : 0;
+        key |= (val_ul > level) ? UL_ABOVE : 0;
 
         // We define the upper-left pixel to be the point at coordinates (row,col)
         // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669
@@ -112,80 +112,71 @@ void createSquare(Square &square, int row, int col, const std::vector<double>& l
         double left = (double) col;
 
         switch(key) {
-            // Case  1 = 0001 = only lower-left above; segment left -> bottom
-            case (LL_ABOVE):
+            // Cases where 1 pixel is above the level
+            case (LL_ABOVE): // Case 1 = 0001
                 square.segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case  2 = 0010 = only lower-right above; segment bottom -> right
-            case (LR_ABOVE):
+            case (LR_ABOVE): // Case 2 = 0010
                 square.segments.insert({level, buildSegment(Side::BOTTOM, Side::RIGHT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case  3 = 0011 = lower-left + lower right above; segment left -> right
-            case (LL_ABOVE | LR_ABOVE):
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                break;
-            // Case  4 = 0100 = only upper-right above; segment right -> top
-            case (UR_ABOVE):
+            case (UR_ABOVE): // Case  4 = 0100
                 square.segments.insert({level, buildSegment(Side::RIGHT, Side::TOP,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case  5 = 0101 = lower-left + upper-right above; segment left -> top + right -> bottom
-            case (LL_ABOVE | UR_ABOVE):
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                square.segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                break;
-            // Case  6 = 0110 = lower-right + upper-right above; segment bottom -> top
-            case (UR_ABOVE | LR_ABOVE):
-                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::TOP,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                break;
-            // Case  7 = 0111 = upper-left below; segment left -> top
-            case (UR_ABOVE | LR_ABOVE | LL_ABOVE):
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                break;
-            // Case  8 = 1000 = upper-left above; segment top -> left
-            case (UL_ABOVE):
+            case (UL_ABOVE): // Case  8 = 1000
                 square.segments.insert({level, buildSegment(Side::TOP, Side::LEFT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case  9 = 1001 = upper-left + lower-left above; segment top -> bottom
-            case (UL_ABOVE | LL_ABOVE):
-                square.segments.insert({level, buildSegment(Side::TOP, Side::BOTTOM,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+            // Cases where 3 pixels are above the level
+            case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case 10 = 1010 = upper-left + lower-right above; segment top -> right + bottom -> left
-            case (UL_ABOVE | LR_ABOVE):
+            case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
                 square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case 11 = 1011 = upper-right below; segment top -> right
-            case (UL_ABOVE | LL_ABOVE | LR_ABOVE):
-                square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                break;
-            // Case 12 = 1100 = upper-left + upper-left above; segment left -> right
-            case (UL_ABOVE | UR_ABOVE):
-                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
-                break;
-            // Case 13 = 1101 = lower-right below; segment left -> bottom
-            case (UL_ABOVE | UR_ABOVE | LL_ABOVE):
+            case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
                 square.segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Case 14 = 1110 = lower-left below; segment bottom -> left
-            case (UL_ABOVE | UR_ABOVE | LR_ABOVE):
+            case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
                 square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
-                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
+            // Cases where 2 adjacent pixels are above the level
+            case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
+                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
+                square.segments.insert({level, buildSegment(Side::TOP, Side::BOTTOM,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
+            case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                square.segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
+                square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                break;
+            // Should never reach here
             default:
                 assert(false);
         }
