@@ -64,9 +64,9 @@ Square createSquare(int row, int col, const std::vector<double>& levels) {
         if (level < pixel_min || level > pixel_max) {
             continue;
         }
-
+    
         uint8_t key = 0;
-
+        
         // TODO: figure out right thing to do regarding tolerance
         if (nw > level) {
             key |= NW_ABOVE;
@@ -95,7 +95,7 @@ Square createSquare(int row, int col, const std::vector<double>& levels) {
                 segment0.start = {col_f + interpolate(se, sw, level), row_f + 1};
                 segment0.end = {col_f + 1, row_f + interpolate(ne, se, level)};
                 break;
-
+                
             // Remember to disambiguate the saddles.
 
             default:
@@ -124,19 +124,19 @@ Contour traverseSquares(Square *squares, double level, Square *square,
     return contour;
 }
 
-void traverseNonClosedContours(Square *squares, double level,
+void traverseNonClosedContours(Square *squares, double level, 
         std::vector<Contour> *contours) {
     // Top
     for (int col = 0; col < ncols - 1; col++) {
         Square square = squares[col];
         auto iter = square.segments.find(level);
-        if (iter != square.segments.end()) {
+        if (iter != square.end()) {
             continue;
         }
 
-        for (auto segment : iter->second) {
+        for (const auto& segment : iter->second) {
             if (segment.start.y == 0.0) {
-                Contour contour = traverseSquares(squares, level, &square, segment);
+                Contour contour = traverseSquares(squares, level, segment);
                 contour.is_closed = false;
             }
         }
@@ -145,7 +145,7 @@ void traverseNonClosedContours(Square *squares, double level,
     for (int row = 0; row < nrows - 1; row++) {
         Square square = squares[row * ncols + ncols - 1];
         auto iter = square.segments.find(level);
-        if (iter != square.segments.end()) {
+        if (iter != square.end()) {
             continue;
         }
 
@@ -164,13 +164,12 @@ void traverseNonClosedContours(Square *squares, double level,
 
 }
 
-void traverseClosedContours(Square *squares, double level,
-    std::vector<Contour> *contours) {
+void traverseClosedContours(Square *squares, double level) {
 }
 
 int main(int argc, char **argv) {
     scanf("%d %d", &nrows, &ncols);
-
+    
     input_array = (float *) malloc(nrows * ncols * sizeof(float));
 
     printf("rows: %d, cols: %d\n", nrows, ncols);
@@ -195,8 +194,8 @@ int main(int argc, char **argv) {
 
     std::vector<Contour> contours;
     for (auto& level : levels) {
-        traverseNonClosedContours(squares, level, &contours);
-        traverseClosedContours(squares, level, &contours);
+        traverseNonClosedContours(squares, levels, &contours);
+        traverseClosedContours(squares, levels, &contours);
     }
 
 
