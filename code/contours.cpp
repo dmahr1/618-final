@@ -13,10 +13,13 @@ constexpr uint8_t UR_ABOVE = 4;
 constexpr uint8_t LR_ABOVE = 2;
 constexpr uint8_t LL_ABOVE = 1;
 
-// Structs
+// Structs and typedefs
+typedef double val_t;
+typedef double coord_t;
+
 typedef struct {
-    double x;
-    double y;
+    coord_t x;
+    coord_t y;
 } Point;
 
 typedef struct {
@@ -28,20 +31,20 @@ typedef struct {
 } Segment;
 
 typedef struct {
-    std::unordered_multimap<double, Segment> segments;
+    std::unordered_multimap<val_t, Segment> segments;
     int row;
     int col;
 } Square;
 
 typedef struct {
     std::vector<Point> line_string;
-    double level;
+    val_t level;
     bool is_closed;
 } Contour;
 
 // Globals
 int nrows, ncols;
-float *input_array;
+val_t *input_array;
 Square *squares;
 
 void printContour(const Contour& contour) {
@@ -54,16 +57,16 @@ void printContour(const Contour& contour) {
     printf("%.2f %.2f)\n", contour.line_string[i].x, contour.line_string[i].y);
 }
 
-inline double interpolate(double left_or_top, double right_or_bottom, double level) {
+inline val_t interpolate(val_t left_or_top, val_t right_or_bottom, val_t level) {
     // Return the coordinate at level linearly proportional between top/left and bottom/right
     // TODO(maybe): do we need to be careful about tolerance?
-    double ret = (level - left_or_top) / (right_or_bottom - left_or_top);
+    val_t ret = (level - left_or_top) / (right_or_bottom - left_or_top);
     assert(ret >= 0);
     return ret;
 };
 
-inline Point interpolatePoint(Side side, double level, double top, double left,
-        double val_ll, double val_lr, double val_ur, double val_ul) {
+inline Point interpolatePoint(Side side, val_t level, coord_t top, coord_t left,
+        val_t val_ll, val_t val_lr, val_t val_ur, val_t val_ul) {
     switch(side) {
         case Side::LEFT:
             return {left,  top + interpolate(val_ul, val_ll, level)};
@@ -77,8 +80,8 @@ inline Point interpolatePoint(Side side, double level, double top, double left,
     assert(false);
 }
 
-inline Segment buildSegment(Side side_start, Side side_end, double level, double top, double left,
-        double val_ll, double val_lr, double val_ur, double val_ul) {
+inline Segment buildSegment(Side side_start, Side side_end, val_t level, coord_t top, coord_t left,
+        val_t val_ll, val_t val_lr, val_t val_ur, val_t val_ul) {
     Segment segment;
     segment.visited = false;
     segment.start_side = side_start;
@@ -88,18 +91,18 @@ inline Segment buildSegment(Side side_start, Side side_end, double level, double
     return segment;
 }
 
-void createSquare(Square *square, int row, int col, const std::vector<double>& levels) {
+void createSquare(Square *square, int row, int col, const std::vector<val_t>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
     square->row = row;
     square->col = col;
 
     // Get pixel values at corners around this square
-    double val_ll = input_array[(row + 1) * ncols + col];
-    double val_lr = input_array[(row + 1) * ncols + col + 1];
-    double val_ur = input_array[row * ncols + col + 1];
-    double val_ul = input_array[row * ncols + col];
-    double pixel_min = std::min(val_ll, std::min(val_lr, std::min(val_ur, val_ul)));
-    double pixel_max = std::max(val_ll, std::max(val_lr, std::max(val_ur, val_ul)));
+    val_t val_ll = input_array[(row + 1) * ncols + col];
+    val_t val_lr = input_array[(row + 1) * ncols + col + 1];
+    val_t val_ur = input_array[row * ncols + col + 1];
+    val_t val_ul = input_array[row * ncols + col];
+    val_t pixel_min = std::min(val_ll, std::min(val_lr, std::min(val_ur, val_ul)));
+    val_t pixel_max = std::max(val_ll, std::max(val_lr, std::max(val_ur, val_ul)));
 
     // Iterate over all levels, skipping those that are out of range for these pixels
     for (auto& level : levels) {
@@ -116,8 +119,8 @@ void createSquare(Square *square, int row, int col, const std::vector<double>& l
 
         // We define the upper-left pixel to be the point at coordinates (row,col)
         // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669
-        double top = (double) row;
-        double left = (double) col;
+        coord_t top = (coord_t) row;
+        coord_t left = (coord_t) col;
 
         switch(key) {
             // Cases where 1 pixel is above the level
@@ -193,7 +196,7 @@ void createSquare(Square *square, int row, int col, const std::vector<double>& l
 }
 
 // Find (unvisited) segment at given level starting from given side in given square
-bool lookupSegmentInSquare(Segment **segment, double level, Square *square, Side start_side,
+bool lookupSegmentInSquare(Segment **segment, val_t level, Square *square, Side start_side,
         bool unvisited_only) {
     int num_segments_found = 0;
     auto range = square->segments.equal_range(level);
@@ -209,7 +212,7 @@ bool lookupSegmentInSquare(Segment **segment, double level, Square *square, Side
 }
 
 // Go from segment at level in square to next segment, updating points in-place
-bool traverseToNextSegment(Square **square, Segment **segment, double level) {
+bool traverseToNextSegment(Square **square, Segment **segment, val_t level) {
 
     // Traverse left
     if ((*segment)->end_side == Side::LEFT && (*square)->col > 0) {
@@ -234,7 +237,7 @@ bool traverseToNextSegment(Square **square, Segment **segment, double level) {
 
 }
 
-Contour* traverseContour(double level, Square *starting_square, Segment *starting_segment) {
+Contour* traverseContour(val_t level, Square *starting_square, Segment *starting_segment) {
 
     // Initialize the contour with the first two vertices
     Contour *contour = new Contour();
@@ -254,7 +257,7 @@ Contour* traverseContour(double level, Square *starting_square, Segment *startin
     return contour;
 }
 
-void traverseNonClosedContours(double level, std::vector<Contour*> *contours) {
+void traverseNonClosedContours(val_t level, std::vector<Contour*> *contours) {
     Segment *segment;
     int row = 0, col = 0;
     // Check squares in top row, exclusive of square in rightmost column
@@ -295,7 +298,7 @@ void traverseNonClosedContours(double level, std::vector<Contour*> *contours) {
     }
 }
 
-void traverseClosedContours(double level, std::vector<Contour*> *contours) {
+void traverseClosedContours(val_t level, std::vector<Contour*> *contours) {
     // Iterate over all squares, begin traversal at any unvisited segments
     for (int row = 0; row < nrows; row++) {
         for (int col = 0; col < ncols; col++) {
@@ -338,23 +341,23 @@ int main(int argc, char **argv) {
 
     // Initialize data structures that are proportional to the raster size
     scanf("%d %d", &nrows, &ncols);
-    input_array = new float[nrows * ncols];
+    input_array = new val_t[nrows * ncols];
     squares = new Square[nrows * ncols];
     printf("rows: %d, cols: %d\n", nrows, ncols);
 
     // Populate the input data array
-    float val;
+    val_t val;
     int index = 0;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
-            scanf("%f", &val);
+            scanf("%lf", &val);
             input_array[index] = val;
             index += 1;
         }
     }
 
     // Phase 1: generate segments in each square (in parallel)
-    std::vector<double> levels = {180.0, 185.0, 190.0, 195.0};
+    std::vector<val_t> levels = {180.0, 185.0, 190.0, 195.0};
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
             createSquare(&squares[i * ncols + j], i, j, levels);
