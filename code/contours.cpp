@@ -327,7 +327,7 @@ void traverseClosedContours(val_t level, std::vector<Contour*> *contours) {
             Segment *segment;
             if (lookupSegmentInSquare(&segment, level, square, Side::ANY, true)) {
                 Contour *contour = traverseContour(level, square, segment);
-                contour->is_closed = false;
+                contour->is_closed = true;
                 contours->push_back(contour);
             }
         }
@@ -378,7 +378,13 @@ int main(int argc, char **argv) {
     }
 
     // Phase 1: generate segments in each square (in parallel)
-    std::vector<val_t> levels = {180.0, 185.0, 190.0, 195.0};
+    std::vector<double> levels;
+    for (double level = -1.0; level <= 1.0; level += 0.1) {
+        levels.push_back(level);
+    }
+
+    levels = {75.0, 150.0};
+
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
             createSquare(&squares[i * ncols + j], i, j, levels);
