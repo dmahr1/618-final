@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 // Constants and enumerations
-enum class Side {TOP, BOTTOM, LEFT, RIGHT};
+enum class Side {TOP, BOTTOM, LEFT, RIGHT, ANY};
 constexpr uint8_t UL_ABOVE = 8;
 constexpr uint8_t UR_ABOVE = 4;
 constexpr uint8_t LR_ABOVE = 2;
@@ -45,11 +45,40 @@ float *input_array;
 Square *squares;
 
 
-double interpolate(double low, double high, double level) {
-    // Return the linear fraction of level between low and high
-    assert(level > low && level < high);
-    return (level - low) / (high - low);
+inline double interpolate(double left_or_top, double right_or_bottom, double level) {
+    // Return the coordinate at level linearly proportional between top/left and bottom/right
+    double ret = (level - left_or_top) / (right_or_bottom - left_or_top);
+    assert(ret >= 0);
+    return ret;
 };
+
+inline Point interpolatePoint(Side side, double level, double top, double left,
+        double val_ul, double val_ur, double val_lr, double val_ll) {
+    switch(side) {
+        case Side::LEFT:
+            return {left,  top + interpolate(val_ul, val_ll, level)};
+        case Side::RIGHT:
+            return {left + 1.0, top + interpolate(val_ur, val_lr, level)};
+        case Side::TOP:
+            return {left + interpolate(val_ul, val_ur, level), top};
+        case Side::BOTTOM:
+            return {left + interpolate(val_ll, val_lr, level), top + 1.0};
+    }
+    assert(false);
+}
+
+inline Segment buildSegment(Side side_start, Side side_end, double level, double top, double left,
+        double val_ul, double val_ur, double val_lr, double val_ll) {
+
+    Segment segment;
+    segment.visited = false;
+    segment.start_side = side_start;
+    segment.end_side = side_end;
+    segment.start = interpolatePoint(side_start, level, top, left, val_ul, val_ur, val_lr, val_ll);
+    segment.end = interpolatePoint(side_end, level, top, left, val_ul, val_ur, val_lr, val_ll);
+    return segment;
+
+}
 
 void createSquare(Square &square, int row, int col, const std::vector<double>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
@@ -81,34 +110,84 @@ void createSquare(Square &square, int row, int col, const std::vector<double>& l
         // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669
         double top = (double) row;
         double left = (double) col;
-        double right = left + 1.0;
-        double bottom = top + 1.0;
 
-        Segment segment;
-        segment.visited = false;
         switch(key) {
-            // Lower-left pixel above, others below. Segment traverses left side to bottom side
-            case 1:
-                segment.start = {left, top + interpolate(val_ul, val_ll, level)};
-                segment.end = {right - interpolate(val_lr, val_ll, level), bottom};
-                segment.start_side = Side::LEFT;
-                segment.end_side = Side::BOTTOM;
-                square.segments.insert({level, segment});
+            // Case  1 = 0001 = only lower-left above; segment left -> bottom
+            case (LL_ABOVE):
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
                 break;
-            // Lower-right pixel above, others below. Segment traverses bottom side to right side
-            case 2:
-                segment.start = {left + interpolate(val_ll, val_lr, level), bottom};
-                segment.end = {right, top + interpolate(val_ur, val_lr, level)};
-                segment.start_side = Side::BOTTOM;
-                segment.end_side = Side::RIGHT;
-                square.segments.insert({level, segment});
+            // Case  2 = 0010 = only lower-right above; segment bottom -> right
+            case (LR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::RIGHT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
                 break;
-
-            // Remember to disambiguate the saddles.
-
+            // Case  3 = 0011 = lower-left + lower right above; segment left -> right
+            case (LL_ABOVE | LR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case  4 = 0100 = only upper-right above; segment right -> top
+            case (UR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::RIGHT, Side::TOP,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case  5 = 0101 = lower-left + upper-right above; segment left -> top + right -> bottom
+            case (LL_ABOVE | UR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                square.segments.insert({level, buildSegment(Side::RIGHT, Side::BOTTOM,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case  6 = 0110 = lower-right + upper-right above; segment bottom -> top
+            case (UR_ABOVE | LR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::TOP,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case  7 = 0111 = upper-left below; segment left -> top
+            case (UR_ABOVE | LR_ABOVE | LL_ABOVE):
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::TOP,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case  8 = 1000 = upper-left above; segment top -> left
+            case (UL_ABOVE):
+                square.segments.insert({level, buildSegment(Side::TOP, Side::LEFT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case  9 = 1001 = upper-left + lower-left above; segment top -> bottom
+            case (UL_ABOVE | LL_ABOVE):
+                square.segments.insert({level, buildSegment(Side::TOP, Side::BOTTOM,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case 10 = 1010 = upper-left + lower-right above; segment top -> right + bottom -> left
+            case (UL_ABOVE | LR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case 11 = 1011 = upper-right below; segment top -> right
+            case (UL_ABOVE | LL_ABOVE | LR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::TOP, Side::RIGHT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case 12 = 1100 = upper-left + upper-left above; segment left -> right
+            case (UL_ABOVE | UR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::RIGHT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case 13 = 1101 = lower-right below; segment left -> bottom
+            case (UL_ABOVE | UR_ABOVE | LL_ABOVE):
+                square.segments.insert({level, buildSegment(Side::LEFT, Side::BOTTOM,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
+            // Case 14 = 1110 = lower-left below; segment bottom -> left
+            case (UL_ABOVE | UR_ABOVE | LR_ABOVE):
+                square.segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
+                        level, top, left, val_ul, val_ur, val_lr, val_ll)});
+                break;
             default:
-                break;
-                // Raise an error.
+                assert(false);
         }
     }
 }
@@ -119,7 +198,7 @@ bool lookupSegmentInSquare(Segment **segment, double level, Square *square, Side
     int num_segments_found = 0;
     auto range = square->segments.equal_range(level);
     for (auto iter = range.first; iter != range.second; iter++) {
-        if (iter->second.start_side == start_side &&
+        if ((start_side == Side::ANY || iter->second.start_side == start_side) &&
                 (!unvisited_only || iter->second.visited == false)) {
             *segment = &(iter->second);
             num_segments_found++;
@@ -176,7 +255,6 @@ Contour* traverseContour(double level, Square *starting_square, Segment *startin
 }
 
 void traverseNonClosedContours(double level, std::vector<Contour*> *contours) {
-
     Segment *segment;
     int row = 0, col = 0;
     // Check squares in top row, exclusive of square in rightmost column
@@ -215,11 +293,45 @@ void traverseNonClosedContours(double level, std::vector<Contour*> *contours) {
             contours->push_back(contour);
         }
     }
-
 }
 
 void traverseClosedContours(double level, std::vector<Contour*> *contours) {
+    // Iterate over all squares, begin traversal at any unvisited segments
+    for (int row = 0; row < nrows; row++) {
+        for (int col = 0; col < ncols; col++) {
+            Square *square = &squares[row * ncols + col];
+            Segment *segment;
+            if (lookupSegmentInSquare(&segment, level, square, Side::ANY, true)) {
+                Contour *contour = traverseContour(level, square, segment);
+                contour->is_closed = false;
+                contours->push_back(contour);
+            }
+        }
+    }
+}
 
+void countSegments(int *total_segments = nullptr, int *unvisited_segments = nullptr) {
+    int total = 0, unvisited = 0;
+    Square *square;
+    Segment *segment;
+    for (int row = 0; row < nrows; row++) {
+        for (int col = 0; col < ncols; col++) {
+            Square *square = &squares[row * ncols + col];
+            for (auto iter = square->segments.begin(); iter != square->segments.end(); iter++) {
+                total++;
+                if (iter->second.visited == false) {
+                    unvisited++;
+                }
+            }
+        }
+    }
+    if (total_segments != nullptr && unvisited_segments != nullptr) {
+        *total_segments = total;
+        *unvisited_segments = unvisited;
+    } else {
+        float percent = ((float) total) / ((float) unvisited);
+        printf("Found %i segments, %i (%.2f%%) are unvisited.\n", total, unvisited, percent);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -248,6 +360,7 @@ int main(int argc, char **argv) {
             createSquare(squares[i * ncols + j], i, j, levels);
         }
     }
+    countSegments();
 
     // Phase 2: join adjacent segments into contours
     std::vector<Contour *> contours;
@@ -255,6 +368,7 @@ int main(int argc, char **argv) {
         traverseNonClosedContours(level, &contours);
         traverseClosedContours(level, &contours);
     }
+    countSegments();
 
     return 0;
 }
