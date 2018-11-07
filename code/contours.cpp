@@ -1,8 +1,10 @@
 #include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <iostream>
+#include <limits>
 #include <unordered_map>
 #include <vector>
-#include <cstring>
-#include <limits>
 
 #include <assert.h>
 #include <stdlib.h>
@@ -44,6 +46,8 @@ typedef struct {
     bool is_closed;
 } Contour;
 
+using Time = std::chrono::high_resolution_clock;
+
 // Globals
 int nrows, ncols;
 val_t *input_array;
@@ -51,6 +55,30 @@ Square *squares;
 Point raster_ll;
 coord_t pixel_size;
 
+static int _argc;
+static char **_argv;
+
+const char *get_option_string(const char *option_name,
+                                      const char *default_value) {
+        for (int i = _argc - 2; i >= 0; i -= 2)
+                    if (strcmp(_argv[i], option_name) == 0)
+                                    return _argv[i + 1];
+            return default_value;
+}
+
+int get_option_int(const char *option_name, int default_value) {
+        for (int i = _argc - 2; i >= 0; i -= 2)
+                    if (strcmp(_argv[i], option_name) == 0)
+                                    return atoi(_argv[i + 1]);
+            return default_value;
+}
+
+float get_option_float(const char *option_name, float default_value) {
+        for (int i = _argc - 2; i >= 0; i -= 2)
+                    if (strcmp(_argv[i], option_name) == 0)
+                                    return (float)atof(_argv[i + 1]);
+            return default_value;
+}
 
 inline val_t interpolate(val_t left_or_top, val_t right_or_bottom, val_t level) {
     // Return the coordinate at level linearly proportional between top/left and bottom/right
@@ -332,41 +360,41 @@ inline Point transformPoint(Point point) {
     return point;
 }
 
-void printGeoJSON(const std::vector<Contour *> contours) {
-    printf("{ \"type\":\"FeatureCollection\", \"features\": [\n");
+void printGeoJSON(FILE *output, const std::vector<Contour *> contours) {
+    fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
     int i;
     for (i = 0; i < contours.size(); i++) {
         Contour *contour = contours[i];
-        printf("{ \"type\":\"Feature\", ");
-        printf("\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
+        fprintf(output, "{ \"type\":\"Feature\", ");
+        fprintf(output, "\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
                 contour->level, (contour->is_closed) ? "true" : "false");
-        printf("\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
+        fprintf(output, "\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
         int j;
         for (j = 0; j < contour->line_string.size() - 1; j++) {
             Point pt = transformPoint(contour->line_string[j]);
-            printf("[%.8lf,%.8lf],", pt.x, pt.y);
+            fprintf(output, "[%.8lf,%.8lf],", pt.x, pt.y);
         }
         Point pt = transformPoint(contour->line_string[j]);
-        printf("[%.8lf,%.8lf] ] } }", pt.x, pt.y);
-        printf("%s\n", (i < contours.size() - 1) ? "," : "");
+        fprintf(output, "[%.8lf,%.8lf] ] } }", pt.x, pt.y);
+        fprintf(output, "%s\n", (i < contours.size() - 1) ? "," : "");
     }
-    printf("] } \n");
+    fprintf(output, "] } \n");
 }
 
 // Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
 // Arbitary input raster files can be converted to this format with this GDAL command:
 //    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
-void readHeader() {
+void readHeader(FILE *input) {
     char str[100];
-    std::scanf("%s %d", str, &ncols);
+    std::fscanf(input, "%s %d", str, &ncols);
     assert(std::strcmp(str, "ncols") == 0);
-    std::scanf("%s %d", str, &nrows);
+    std::fscanf(input, "%s %d", str, &nrows);
     assert(std::strcmp(str, "nrows") == 0);
-    std::scanf("%s %lf", str, &raster_ll.x);
+    std::fscanf(input, "%s %lf", str, &raster_ll.x);
     assert(std::strcmp(str, "xllcorner") == 0);
-    std::scanf("%s %lf", str, &raster_ll.y);
+    std::fscanf(input, "%s %lf", str, &raster_ll.y);
     assert(std::strcmp(str, "yllcorner") == 0);
-    std::scanf("%s %lf", str, &pixel_size);
+    std::fscanf(input, "%s %lf", str, &pixel_size);
     assert(std::strcmp(str, "cellsize") == 0);
 }
 
@@ -394,9 +422,21 @@ std::vector<val_t> determineLevels(int argc, char **argv, val_t val_min, val_t v
 }
 
 int main(int argc, char **argv) {
+    _argc = argc - 1;
+    _argv = argv + 1;
+       
+    const char *input_filename = get_option_string("-f", nullptr);
+    FILE *input = fopen(input_filename, "r");
+
+    if (!input) {
+        printf("Unable to open file: %s.\n", input_filename);
+        return -1;
+    }
+        
+    auto init_start = Time::now();
 
     // Read entire header, which is in ASCII format, to global variables
-    readHeader();
+    readHeader(input);
 
     // Initialize data structures that are proportional to the raster size. Since squares is gaps
     //   between pixels, it has (nrows-1) * (ncols-1) elements.
@@ -410,32 +450,44 @@ int main(int argc, char **argv) {
     int index = 0;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
-            scanf("%lf", &val);
+            fscanf(input, "%lf", &val);
             input_array[index] = val;
             index += 1;
             val_min = std::fmin(val_min, val);
             val_max = std::fmax(val_max, val);
         }
     }
+    fclose(input);
 
     // Based on input args, min and max value of the input data, compute the levels
     std::vector<val_t> levels = determineLevels(argc, argv, val_min, val_max);
 
+    std::cout << "Initialization time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - init_start).count() 
+        << " microseconds\n";
+
+    auto p1_start = Time::now();
     // Phase 1: generate segments in each square (in parallel)
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
             createSquare(&squares[i * (ncols - 1) + j], i, j, levels);
         }
     }
+    std::cout << "Phase 1 time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p1_start).count() << " microseconds\n";
 
+    auto p2_start = Time::now();
     // Phase 2: join adjacent segments into contours
     std::vector<Contour *> contours;
     for (auto& level : levels) {
         traverseNonClosedContours(level, &contours);
         traverseClosedContours(level, &contours);
     }
+    std::cout << "Phase 2 time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
 
-    printGeoJSON(contours);
+    char output_filename[100];
+    sprintf(output_filename, "output_%s.txt", basename(input_filename));
+    FILE *output_file = fopen(output_filename, "w");
+    printGeoJSON(output_file, contours);
+    fclose(output_file);
 
     return 0;
 }

@@ -8,4 +8,9 @@ z = np.sin(x)**10 + np.cos(10 + y*x) * np.cos(x)
 
 z = z[:-1,:-1]
 
-np.savetxt("trig.txt", z, header="{} {}".format(z.shape[0], z.shape[1]), comments='')
+header = "ncols {}\n".format(z.shape[1])
+header += "nrows {}\n".format(z.shape[0])
+header += "xllcorner {}\n".format(0)
+header += "yllcorner {}\n".format(0)
+header += "cellsize {}".format(0.0001)
+np.savetxt("trig.txt", z, header=header, comments='')
