@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#include <cstring>
+#include <limits>
 
 #include <assert.h>
 #include <stdlib.h>
@@ -46,27 +48,9 @@ typedef struct {
 int nrows, ncols;
 val_t *input_array;
 Square *squares;
+Point raster_ll;
+coord_t pixel_size;
 
-void printGeoJSON(const std::vector<Contour *> contours) {
-    printf("{ \"type\":\"FeatureCollection\", \"features\": [\n");
-    int i;
-    for (i = 0; i < contours.size(); i++) {
-        Contour *contour = contours[i];
-        printf("{ \"type\":\"Feature\", ");
-        printf("\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
-                contour->level, (contour->is_closed) ? "true" : "false");
-        printf("\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
-        int j;
-        for (j = 0; j < contour->line_string.size() - 1; j++) {
-            Point pt = contour->line_string[j];
-            printf("[%.4f,%.4f],", pt.x, pt.y);
-        }
-        Point pt = contour->line_string[j];
-        printf("[%.4f,%.4f] ] } }", pt.x, pt.y);
-        printf("%s\n", (i < contours.size() - 1) ? "," : "");
-    }
-    printf("] } \n");
-}
 
 inline val_t interpolate(val_t left_or_top, val_t right_or_bottom, val_t level) {
     // Return the coordinate at level linearly proportional between top/left and bottom/right
@@ -112,8 +96,8 @@ void createSquare(Square *square, int row, int col, const std::vector<val_t>& le
     val_t val_lr = input_array[(row + 1) * ncols + col + 1];
     val_t val_ur = input_array[row * ncols + col + 1];
     val_t val_ul = input_array[row * ncols + col];
-    val_t pixel_min = std::min(val_ll, std::min(val_lr, std::min(val_ur, val_ul)));
-    val_t pixel_max = std::max(val_ll, std::max(val_lr, std::max(val_ur, val_ul)));
+    val_t pixel_min = std::fmin(val_ll, std::fmin(val_lr, std::fmin(val_ur, val_ul)));
+    val_t pixel_max = std::fmax(val_ll, std::fmax(val_lr, std::fmax(val_ur, val_ul)));
 
     // Iterate over all levels, skipping those that are out of range for these pixels
     for (auto& level : levels) {
@@ -198,9 +182,6 @@ void createSquare(Square *square, int row, int col, const std::vector<val_t>& le
                 square->segments.insert({level, buildSegment(Side::BOTTOM, Side::LEFT,
                         level, top, left, val_ll, val_lr, val_ur, val_ul)});
                 break;
-            // Should never reach here
-            default:
-                assert(false);
         }
     }
 }
@@ -345,27 +326,102 @@ void countSegments(int *total_segments = nullptr, int *unvisited_segments = null
     }
 }
 
+inline Point transformPoint(Point point) {
+    point.x =  point.x * pixel_size + raster_ll.x;
+    point.y = (-point.y + nrows) * pixel_size + raster_ll.y;
+    return point;
+}
+
+void printGeoJSON(const std::vector<Contour *> contours) {
+    printf("{ \"type\":\"FeatureCollection\", \"features\": [\n");
+    int i;
+    for (i = 0; i < contours.size(); i++) {
+        Contour *contour = contours[i];
+        printf("{ \"type\":\"Feature\", ");
+        printf("\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
+                contour->level, (contour->is_closed) ? "true" : "false");
+        printf("\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
+        int j;
+        for (j = 0; j < contour->line_string.size() - 1; j++) {
+            Point pt = transformPoint(contour->line_string[j]);
+            printf("[%.8lf,%.8lf],", pt.x, pt.y);
+        }
+        Point pt = transformPoint(contour->line_string[j]);
+        printf("[%.8lf,%.8lf] ] } }", pt.x, pt.y);
+        printf("%s\n", (i < contours.size() - 1) ? "," : "");
+    }
+    printf("] } \n");
+}
+
+// Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
+// Arbitary input raster files can be converted to this format with this GDAL command:
+//    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
+void readHeader() {
+    char str[100];
+    std::scanf("%s %d", str, &ncols);
+    assert(std::strcmp(str, "ncols") == 0);
+    std::scanf("%s %d", str, &nrows);
+    assert(std::strcmp(str, "nrows") == 0);
+    std::scanf("%s %lf", str, &raster_ll.x);
+    assert(std::strcmp(str, "xllcorner") == 0);
+    std::scanf("%s %lf", str, &raster_ll.y);
+    assert(std::strcmp(str, "yllcorner") == 0);
+    std::scanf("%s %lf", str, &pixel_size);
+    assert(std::strcmp(str, "cellsize") == 0);
+}
+
+std::vector<val_t> determineLevels(int argc, char **argv, val_t val_min, val_t val_max) {
+
+    val_t interval;
+    // If interval was provided, parse it
+    if (argc == 2) {
+        interval = std::atof(argv[1]);
+    // Else just subdivide into ~10 levels
+    } else {
+        interval = (val_max - val_min) / 10.0;
+    }
+
+    // Populate levels every <interval> starting just below val_min to just above val_max
+    std::vector<val_t> levels;
+    val_t val;
+    for (val = val_min - fmod(val_min, interval); val < val_max; val += interval) {
+        levels.push_back(val);
+    }
+    levels.push_back(val);
+
+    return levels;
+
+}
+
 int main(int argc, char **argv) {
 
-    // Initialize data structures that are proportional to the raster size Since squares is gaps
-    //   between pixel, it has (nrows-1) * (ncols-1) elements.
-    scanf("%d %d", &nrows, &ncols);
+    // Read entire header, which is in ASCII format, to global variables
+    readHeader();
+
+    // Initialize data structures that are proportional to the raster size. Since squares is gaps
+    //   between pixels, it has (nrows-1) * (ncols-1) elements.
     input_array = new val_t[nrows * ncols];
     squares = new Square[(nrows - 1) * (ncols - 1)];
 
     // Populate the input data array
     val_t val;
+    val_t val_min = std::numeric_limits<double>::max();
+    val_t val_max = std::numeric_limits<double>::lowest();
     int index = 0;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
             scanf("%lf", &val);
             input_array[index] = val;
             index += 1;
+            val_min = std::fmin(val_min, val);
+            val_max = std::fmax(val_max, val);
         }
     }
 
+    // Based on input args, min and max value of the input data, compute the levels
+    std::vector<val_t> levels = determineLevels(argc, argv, val_min, val_max);
+
     // Phase 1: generate segments in each square (in parallel)
-    std::vector<val_t> levels = {75.0, 150.0};
     for (int i = 0; i < nrows - 1; i++) {
         for (int j = 0; j < ncols - 1; j++) {
             createSquare(&squares[i * (ncols - 1) + j], i, j, levels);

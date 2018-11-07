@@ -12,4 +12,5 @@
 *.gdoc
 settings.json
 .vscode/*
-
+*.json
+*.geojson
