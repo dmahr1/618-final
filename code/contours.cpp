@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <assert.h>
+#include <omp.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -17,6 +18,7 @@ constexpr uint8_t UL_ABOVE = 8;
 constexpr uint8_t UR_ABOVE = 4;
 constexpr uint8_t LR_ABOVE = 2;
 constexpr uint8_t LL_ABOVE = 1;
+constexpr int BLOCK_DIM = 8;
 
 // Structs and typedefs
 typedef double val_t;
@@ -46,6 +48,8 @@ inline Point interpolatePoint(const Side side, const val_t level, const coord_t 
             return {left + interpolate(ul, ur, level), top};
         case Side::BOTTOM:
             return {left + interpolate(ll, lr, level), top + 1.0};
+        default:
+            assert(false);
     }
     assert(false);
 }
@@ -55,16 +59,16 @@ struct Segment {
             const coord_t top, const coord_t left, const val_t ll,
             const val_t lr, const val_t ur, const val_t ul) :
 
-        visited(false), start_side(side_start), end_side(side_end) {
+        start_side(side_start), end_side(side_end), visited(false) {
         start = interpolatePoint(side_start, level, top, left, ll, lr, ur, ul);
         end = interpolatePoint(side_end, level, top, left, ll, lr, ur, ul);
     }
 
-    Point start;
-    Point end;
     Side start_side;
     Side end_side;
     bool visited;
+    Point start;
+    Point end;
 };
 
 typedef struct Segment Segment;
@@ -81,14 +85,23 @@ typedef struct {
     bool is_closed;
 } Contour;
 
+typedef struct {
+    int first_row;
+    int first_col;
+    int num_rows;
+    int num_cols;
+    // std::unordered_multimap<SegmentKey, Segment> segments; // For later
+} Block;
+
 using Time = std::chrono::high_resolution_clock;
 
 // Globals
-int nrows, ncols;
+int nrows, ncols, nblocksh, nblocksv;
 val_t *input_array;
 Square *squares;
 Point raster_ll;
 coord_t pixel_size;
+Block *blocks;
 
 static int _argc;
 static char **_argv;
@@ -286,7 +299,7 @@ Contour* traverseContour(val_t level, Square *starting_square, Segment *starting
 }
 
 void traverseNonClosedContours(const val_t level, std::vector<Contour*> *const contours) {
-    Segment *segment;
+    Segment *segment = NULL;
     int row = 0, col = 0;
     // Check squares in top row, exclusive of square in rightmost column
     for (; col < ncols - 2; col++) {
@@ -330,7 +343,7 @@ void traverseClosedContours(const val_t level, std::vector<Contour*> *const cont
     // Iterate over all squares, begin traversal at any unvisited segments
     for (int idx = 0; idx < (nrows - 1) * (ncols - 1); idx++) {
         Square *square = &squares[idx];
-        Segment *segment;
+        Segment *segment = NULL;
         if (lookupSegmentInSquare(&segment, level, square, Side::ANY, true)) {
             Contour *contour = traverseContour(level, square, segment);
             contour->is_closed = true;
@@ -342,9 +355,8 @@ void traverseClosedContours(const val_t level, std::vector<Contour*> *const cont
 void countSegments(int *total_segments = nullptr, int *unvisited_segments = nullptr) {
     int total = 0, unvisited = 0;
     Square *square;
-    Segment *segment;
     for (int idx = 0; idx < (nrows - 1) * (ncols - 1); idx++) {
-        Square *square = &squares[idx];
+        square = &squares[idx];
         for (auto iter = square->segments.begin(); iter != square->segments.end(); iter++) {
             total++;
             if (iter->second.visited == false) {
@@ -371,14 +383,14 @@ inline Point transformPoint(Point point) {
 
 void printGeoJSON(FILE *output, const std::vector<Contour *> contours) {
     fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
-    int i;
+    size_t i;
     for (i = 0; i < contours.size(); i++) {
         Contour *contour = contours[i];
         fprintf(output, "{ \"type\":\"Feature\", ");
         fprintf(output, "\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
                 contour->level, (contour->is_closed) ? "true" : "false");
         fprintf(output, "\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
-        int j;
+        size_t j;
         for (j = 0; j < contour->line_string.size() - 1; j++) {
             Point pt = transformPoint(contour->line_string[j]);
             fprintf(output, "[%.8lf,%.8lf],", pt.x, pt.y);
@@ -395,16 +407,17 @@ void printGeoJSON(FILE *output, const std::vector<Contour *> contours) {
 //    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
 void readHeader(FILE *input) {
     char str[100];
-    std::fscanf(input, "%s %d", str, &ncols);
-    assert(std::strcmp(str, "ncols") == 0);
-    std::fscanf(input, "%s %d", str, &nrows);
-    assert(std::strcmp(str, "nrows") == 0);
-    std::fscanf(input, "%s %lf", str, &raster_ll.x);
-    assert(std::strcmp(str, "xllcorner") == 0);
-    std::fscanf(input, "%s %lf", str, &raster_ll.y);
-    assert(std::strcmp(str, "yllcorner") == 0);
-    std::fscanf(input, "%s %lf", str, &pixel_size);
-    assert(std::strcmp(str, "cellsize") == 0);
+    int ret;
+    ret = std::fscanf(input, "%s %d", str, &ncols);
+    assert(ret > 0 && std::strcmp(str, "ncols") == 0);
+    ret = std::fscanf(input, "%s %d", str, &nrows);
+    assert(ret > 0 && std::strcmp(str, "nrows") == 0);
+    ret = std::fscanf(input, "%s %lf", str, &raster_ll.x);
+    assert(ret > 0 && std::strcmp(str, "xllcorner") == 0);
+    ret = std::fscanf(input, "%s %lf", str, &raster_ll.y);
+    assert(ret > 0 && std::strcmp(str, "yllcorner") == 0);
+    ret = std::fscanf(input, "%s %lf", str, &pixel_size);
+    assert(ret > 0 && std::strcmp(str, "cellsize") == 0);
 }
 
 std::vector<val_t> determineLevels(val_t interval, val_t val_min, val_t val_max) {
@@ -456,11 +469,12 @@ int main(int argc, char **argv) {
     val_t val_max = std::numeric_limits<double>::lowest();
 
     // Populate the input data array.
-    int index = 0;
+    int index = 0, ret;
     val_t val;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
-            std::fscanf(input, "%lf", &val);
+            ret = std::fscanf(input, "%lf", &val);
+            assert(ret > 0);
             input_array[index] = val;
             index += 1;
             val_min = std::min(val_min, val);
@@ -473,14 +487,40 @@ int main(int argc, char **argv) {
     // Based on input args, min and max value of the input data, compute the levels.
     std::vector<val_t> levels = determineLevels(interval, val_min, val_max);
 
+    // Perform spatial decomposition of squares into blocks, each of which will be handled by 1 thread
+    nblocksh = (ncols - 1 + BLOCK_DIM - 1) / BLOCK_DIM;
+    nblocksv = (nrows - 1 + BLOCK_DIM - 1) / BLOCK_DIM;
+    printf("Input = %d x %d pixels = %d x %d squares = %d x %d blocks of %d x %d\n",
+            nrows, ncols, nrows - 1, ncols - 1, nblocksv, nblocksh, BLOCK_DIM, BLOCK_DIM);
+    blocks = new Block[nblocksh * nblocksv];
+    for (int ii = 0; ii < nblocksv; ii++) {
+        for (int jj = 0; jj < nblocksh; jj++) {
+            Block *block = &blocks[ii * nblocksh + jj];
+            block->first_row = ii * BLOCK_DIM;
+            block->first_col = jj * BLOCK_DIM;
+            block->num_rows = std::min(BLOCK_DIM, nrows - 1 - block->first_row);
+            block->num_cols = std::min(BLOCK_DIM, ncols - 1 - block->first_col);
+        }
+    }
+
     std::cout << "Initialization time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - init_start).count()
         << " microseconds\n";
-
     auto p1_start = Time::now();
+
     // Phase 1: generate segments in each square (in parallel)
-    for (int i = 0; i < nrows - 1; i++) {
-        for (int j = 0; j < ncols - 1; j++) {
-            populateSquare(&squares[i * (ncols - 1) + j], i, j, levels);
+    int block_num;
+    omp_set_num_threads(16);
+    # pragma omp parallel default(shared) private(block_num)
+    {
+        printf("Num threads = %d\n", omp_get_num_threads());
+        # pragma omp for schedule(static) nowait
+        for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
+            Block *block = &blocks[block_num];
+            for (int i = block->first_row; i < block->first_row + block->num_rows; i++) {
+                for (int j = block->first_col; j < block->first_col + block->num_cols; j++) {
+                    populateSquare(&squares[i * (ncols - 1) + j], i, j, levels);
+                }
+            }
         }
     }
     std::cout << "Phase 1 time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p1_start).count() << " microseconds\n";
@@ -491,10 +531,10 @@ int main(int argc, char **argv) {
     for (const auto& level : levels) {
         auto p2_start = Time::now();
         traverseNonClosedContours(level, &contours);
-        std::cout << "Phase 2.1, level "<< level << " time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
+        // std::cout << "Phase 2.1, level "<< level << " time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
         p2_start = Time::now();
         traverseClosedContours(level, &contours);
-        std::cout << "Phase 2.2, level "<< level << " time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
+        // std::cout << "Phase 2.2, level "<< level << " time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
     }
 
 
