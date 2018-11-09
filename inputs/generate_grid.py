@@ -2,7 +2,7 @@ import numpy as np
 
 dx, dy = 0.05, 0.05
 
-y, x = np.mgrid[slice(1, 5 + dy, dy), slice(1, 5 + dx, dx)]
+y, x = np.mgrid[slice(1, 50 + dy, dy), slice(1, 50 + dx, dx)]
 
 z = np.sin(x)**10 + np.cos(10 + y*x) * np.cos(x)
 

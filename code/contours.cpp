@@ -18,7 +18,7 @@ constexpr uint8_t UL_ABOVE = 8;
 constexpr uint8_t UR_ABOVE = 4;
 constexpr uint8_t LR_ABOVE = 2;
 constexpr uint8_t LL_ABOVE = 1;
-constexpr int BLOCK_DIM = 8;
+constexpr int BLOCK_DIM = 32;
 
 // Structs and typedefs
 typedef double val_t;
@@ -453,6 +453,8 @@ int main(int argc, char **argv) {
 
     val_t interval = get_option_float("-i", -1.0);
 
+    int num_threads = get_option_int("-n", 1);
+
     auto init_start = Time::now();
 
     // Read entire header, which is in ASCII format, to global variables.
@@ -509,10 +511,10 @@ int main(int argc, char **argv) {
 
     // Phase 1: generate segments in each square (in parallel)
     int block_num;
-    omp_set_num_threads(16);
+    omp_set_num_threads(num_threads);
+    printf("max threads: %d\n", omp_get_max_threads());
     # pragma omp parallel default(shared) private(block_num)
     {
-        printf("Num threads = %d\n", omp_get_num_threads());
         # pragma omp for schedule(static) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
             Block *block = &blocks[block_num];
@@ -524,6 +526,8 @@ int main(int argc, char **argv) {
         }
     }
     std::cout << "Phase 1 time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p1_start).count() << " microseconds\n";
+
+    return 0;
 
     // Phase 2: join adjacent segments into contours
     std::vector<Contour *> contours;
