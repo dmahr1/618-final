@@ -35,31 +35,30 @@ inline val_t interpolate(const val_t left_or_top, const val_t right_or_bottom, c
     return ret;
 };
 
-inline Point interpolatePoint(const Side side, const val_t level, const coord_t top, 
-        const coord_t left, const val_t val_ll, const val_t val_lr, const val_t val_ur, 
-        const val_t val_ul) {
+inline Point interpolatePoint(const Side side, const val_t level, const coord_t top,
+        const coord_t left, const val_t ll, const val_t lr, const val_t ur, const val_t ul) {
     switch(side) {
         case Side::LEFT:
-            return {left,  top + interpolate(val_ul, val_ll, level)};
+            return {left,  top + interpolate(ul, ll, level)};
         case Side::RIGHT:
-            return {left + 1.0, top + interpolate(val_ur, val_lr, level)};
+            return {left + 1.0, top + interpolate(ur, lr, level)};
         case Side::TOP:
-            return {left + interpolate(val_ul, val_ur, level), top};
+            return {left + interpolate(ul, ur, level), top};
         case Side::BOTTOM:
-            return {left + interpolate(val_ll, val_lr, level), top + 1.0};
+            return {left + interpolate(ll, lr, level), top + 1.0};
     }
     assert(false);
 }
 
 struct Segment {
-    Segment(const Side side_start, const Side side_end, const val_t level, 
-        const coord_t top, const coord_t left, const val_t val_ll, 
-        const val_t val_lr, const val_t val_ur, const val_t val_ul) :
-    
+    Segment(const Side side_start, const Side side_end, const val_t level,
+            const coord_t top, const coord_t left, const val_t ll,
+            const val_t lr, const val_t ur, const val_t ul) :
+
         visited(false), start_side(side_start), end_side(side_end) {
-        start = interpolatePoint(side_start, level, top, left, val_ll, val_lr, val_ur, val_ul);
-        end = interpolatePoint(side_end, level, top, left, val_ll, val_lr, val_ur, val_ul);
-    }  
+        start = interpolatePoint(side_start, level, top, left, ll, lr, ur, ul);
+        end = interpolatePoint(side_end, level, top, left, ll, lr, ur, ul);
+    }
 
     Point start;
     Point end;
@@ -94,42 +93,47 @@ coord_t pixel_size;
 static int _argc;
 static char **_argv;
 
-const char *get_option_string(const char *option_name,
-                                      const char *default_value) {
-        for (int i = _argc - 2; i >= 0; i -= 2)
-                    if (strcmp(_argv[i], option_name) == 0)
-                                    return _argv[i + 1];
-            return default_value;
+const char *get_option_string(const char *option_name, const char *default_value) {
+    for (int i = _argc - 2; i >= 0; i -= 2) {
+        if (strcmp(_argv[i], option_name) == 0) {
+                return _argv[i + 1];
+        }
+    }
+    return default_value;
 }
 
 int get_option_int(const char *option_name, int default_value) {
-        for (int i = _argc - 2; i >= 0; i -= 2)
-                    if (strcmp(_argv[i], option_name) == 0)
-                                    return atoi(_argv[i + 1]);
-            return default_value;
+    for (int i = _argc - 2; i >= 0; i -= 2) {
+        if (strcmp(_argv[i], option_name) == 0) {
+            return atoi(_argv[i + 1]);
+        }
+    }
+    return default_value;
 }
 
 float get_option_float(const char *option_name, float default_value) {
-        for (int i = _argc - 2; i >= 0; i -= 2)
-                    if (strcmp(_argv[i], option_name) == 0)
-                                    return (float)atof(_argv[i + 1]);
-            return default_value;
+    for (int i = _argc - 2; i >= 0; i -= 2) {
+        if (strcmp(_argv[i], option_name) == 0) {
+            return (float)atof(_argv[i + 1]);
+        }
+    }
+    return default_value;
 }
 
 // Populate square with top-left pixel at (row, col).
-void populateSquare(Square *const square, const int row, const int col, 
+void populateSquare(Square *const square, const int row, const int col,
         const std::vector<val_t>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
     square->row = row;
     square->col = col;
 
     // Get pixel values at corners around this square
-    val_t val_ll = input_array[(row + 1) * ncols + col];
-    val_t val_lr = input_array[(row + 1) * ncols + col + 1];
-    val_t val_ur = input_array[row * ncols + col + 1];
-    val_t val_ul = input_array[row * ncols + col];
-    val_t pixel_min = std::min(val_ll, std::min(val_lr, std::min(val_ur, val_ul)));
-    val_t pixel_max = std::max(val_ll, std::max(val_lr, std::max(val_ur, val_ul)));
+    val_t ll = input_array[(row + 1) * ncols + col];
+    val_t lr = input_array[(row + 1) * ncols + col + 1];
+    val_t ur = input_array[row * ncols + col + 1];
+    val_t ul = input_array[row * ncols + col];
+    val_t pixel_min = std::min(ll, std::min(lr, std::min(ur, ul)));
+    val_t pixel_max = std::max(ll, std::max(lr, std::max(ur, ul)));
 
     // Iterate over all levels, skipping those that are out of range for these pixels
     for (const auto& level : levels) {
@@ -138,10 +142,10 @@ void populateSquare(Square *const square, const int row, const int col,
         }
         // TODO: figure out if this is right thing to do regarding tolerance?
         uint8_t key = 0;
-        key |= (val_ll > level) ? LL_ABOVE : 0;
-        key |= (val_lr > level) ? LR_ABOVE : 0;
-        key |= (val_ur > level) ? UR_ABOVE : 0;
-        key |= (val_ul > level) ? UL_ABOVE : 0;
+        key |= (ll > level) ? LL_ABOVE : 0;
+        key |= (lr > level) ? LR_ABOVE : 0;
+        key |= (ur > level) ? UR_ABOVE : 0;
+        key |= (ul > level) ? UL_ABOVE : 0;
 
         // We define the upper-left pixel to be the point at coordinates (row,col)
         // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669.
@@ -153,67 +157,67 @@ void populateSquare(Square *const square, const int row, const int col,
             // Cases where 1 pixel is above the level
             case (LL_ABOVE): // Case 1 = 0001
                 square->segments.insert({level, Segment(Side::LEFT, Side::BOTTOM,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (LR_ABOVE): // Case 2 = 0010
                 square->segments.insert({level, Segment(Side::BOTTOM, Side::RIGHT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UR_ABOVE): // Case  4 = 0100
                 square->segments.insert({level, Segment(Side::RIGHT, Side::TOP,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE): // Case  8 = 1000
                 square->segments.insert({level, Segment(Side::TOP, Side::LEFT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             // Cases where 3 pixels are above the level
             case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
                 square->segments.insert({level, Segment(Side::LEFT, Side::TOP,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
                 square->segments.insert({level, Segment(Side::TOP, Side::RIGHT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
                 square->segments.insert({level, Segment(Side::RIGHT, Side::BOTTOM,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
                 square->segments.insert({level, Segment(Side::BOTTOM, Side::LEFT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             // Cases where 2 adjacent pixels are above the level
             case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
                 square->segments.insert({level, Segment(Side::LEFT, Side::RIGHT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
                 square->segments.insert({level, Segment(Side::BOTTOM, Side::TOP,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
                 square->segments.insert({level, Segment(Side::TOP, Side::BOTTOM,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
                 square->segments.insert({level, Segment(Side::RIGHT, Side::LEFT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             // TODO(maybe): disambiguate saddle points.
             // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
             case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
                 square->segments.insert({level, Segment(Side::LEFT, Side::TOP,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 square->segments.insert({level, Segment(Side::RIGHT, Side::BOTTOM,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
                 square->segments.insert({level, Segment(Side::TOP, Side::RIGHT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 square->segments.insert({level, Segment(Side::BOTTOM, Side::LEFT,
-                        level, top, left, val_ll, val_lr, val_ur, val_ul)});
+                        level, top, left, ll, lr, ur, ul)});
                 break;
         }
     }
@@ -425,7 +429,7 @@ int main(int argc, char **argv) {
     // This directly copies the flag parsing pattern used by assignment 3.
     _argc = argc - 1;
     _argv = argv + 1;
-       
+
     const char *input_filename = get_option_string("-f", nullptr);
     FILE *input = fopen(input_filename, "r");
 
@@ -469,7 +473,7 @@ int main(int argc, char **argv) {
     // Based on input args, min and max value of the input data, compute the levels.
     std::vector<val_t> levels = determineLevels(interval, val_min, val_max);
 
-    std::cout << "Initialization time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - init_start).count() 
+    std::cout << "Initialization time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - init_start).count()
         << " microseconds\n";
 
     auto p1_start = Time::now();
