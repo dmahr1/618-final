@@ -18,7 +18,6 @@ constexpr uint8_t UL_ABOVE = 8;
 constexpr uint8_t UR_ABOVE = 4;
 constexpr uint8_t LR_ABOVE = 2;
 constexpr uint8_t LL_ABOVE = 1;
-constexpr int BLOCK_DIM = 32;
 
 // Structs and typedefs
 typedef double val_t;
@@ -95,16 +94,27 @@ typedef struct {
 
 using Time = std::chrono::high_resolution_clock;
 
-// Globals
-int nrows, ncols, nblocksh, nblocksv;
-val_t *input_array;
-Square *squares;
-Point raster_ll;
-coord_t pixel_size;
-Block *blocks;
-
+// Globals from command line arguments
 static int _argc;
 static char **_argv;
+const char *input_filename;
+val_t interval = -1.0;  // Negative means subdivide into 10
+int num_threads = 1;
+int block_dim = 32;
+
+// Globals from input file's header
+int nrows, ncols;
+Point raster_ll;
+coord_t pixel_size;
+
+// Globals from other places
+FILE *input_file;
+val_t *input_array;
+Square *squares;
+int nblocksh, nblocksv;
+Block *blocks;
+auto prev_time = Time::now();
+
 
 const char *get_option_string(const char *option_name, const char *default_value) {
     for (int i = _argc - 2; i >= 0; i -= 2) {
@@ -417,6 +427,31 @@ void printGeoJSON(FILE *output, const std::vector<Contour *> contours) {
     fprintf(output, "] } \n");
 }
 
+void readArguments(int argc, char **argv) {
+
+    // This directly copies the flag parsing pattern used by assignment 3.
+    _argc = argc - 1;
+    _argv = argv + 1;
+
+    // Open input file
+    input_filename = get_option_string("-f", nullptr);
+    if (!(input_file = fopen(input_filename, "r"))) {
+        printf("Unable to open file: %s.\n", input_filename);
+        exit(-1);
+    }
+
+    // Read interval size
+    interval = get_option_float("-i", interval);
+
+    // Read number of threads and set the omp variable accordingly
+    num_threads = get_option_int("-n", num_threads);
+    omp_set_num_threads(num_threads);
+
+    // Read block dimension
+    block_dim = get_option_int("-b", block_dim);
+
+}
+
 // Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
 // Arbitary input raster files can be converted to this format with this GDAL command:
 //    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
@@ -453,27 +488,21 @@ std::vector<val_t> determineLevels(val_t interval, val_t val_min, val_t val_max)
 
 }
 
+void profileTime(std::string message) {
+    auto new_time = Time::now();
+    auto duration = new_time - prev_time;
+    auto duration_microsecs = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+    std::cout << message << " = " << duration_microsecs << " microseconds\n";
+    prev_time = new_time;
+}
+
 int main(int argc, char **argv) {
-    // This directly copies the flag parsing pattern used by assignment 3.
-    _argc = argc - 1;
-    _argv = argv + 1;
 
-    const char *input_filename = get_option_string("-f", nullptr);
-    FILE *input = fopen(input_filename, "r");
-
-    if (!input) {
-        printf("Unable to open file: %s.\n", input_filename);
-        return -1;
-    }
-
-    val_t interval = get_option_float("-i", -1.0);
-
-    int num_threads = get_option_int("-n", 1);
-
-    auto init_start = Time::now();
+    // Parse command line arguments
+    readArguments(argc, argv);
 
     // Read entire header, which is in ASCII format, to global variables.
-    readHeader(input);
+    readHeader(input_file);
 
     // Initialize data structures that are proportional to the raster size. Since squares are gaps
     // between pixels, Square should have (nrows-1) * (ncols-1) elements.
@@ -490,7 +519,7 @@ int main(int argc, char **argv) {
     val_t val;
     for (int i = 0; i < nrows; i++) {
         for (int j = 0; j < ncols; j++) {
-            ret = std::fscanf(input, "%lf", &val);
+            ret = std::fscanf(input_file, "%lf", &val);
             assert(ret > 0);
             input_array[index] = val;
             index += 1;
@@ -499,35 +528,32 @@ int main(int argc, char **argv) {
         }
     }
     // Done with the input file.
-    fclose(input);
+    fclose(input_file);
 
     // Based on input args, min and max value of the input data, compute the levels.
     std::vector<val_t> levels = determineLevels(interval, val_min, val_max);
 
     // Perform spatial decomposition of squares into blocks, each of which will be handled by 1 thread
-    nblocksh = (ncols - 1 + BLOCK_DIM - 1) / BLOCK_DIM;
-    nblocksv = (nrows - 1 + BLOCK_DIM - 1) / BLOCK_DIM;
-    printf("Input = %d x %d pixels = %d x %d squares = %d x %d blocks of %d x %d\n",
-            nrows, ncols, nrows - 1, ncols - 1, nblocksv, nblocksh, BLOCK_DIM, BLOCK_DIM);
+    nblocksh = (ncols - 1 + block_dim - 1) / block_dim;
+    nblocksv = (nrows - 1 + block_dim - 1) / block_dim;
+    printf("Input file = %s, num threads = %d, block size = %d\n",
+            input_filename, num_threads, block_dim);
+    printf("Dimensions = %d x %d pixels = %d x %d squares = %d x %d blocks, each %d x %d\n",
+            nrows, ncols, nrows - 1, ncols - 1, nblocksv, nblocksh, block_dim, block_dim);
     blocks = new Block[nblocksh * nblocksv];
     for (int ii = 0; ii < nblocksv; ii++) {
         for (int jj = 0; jj < nblocksh; jj++) {
             Block *block = &blocks[ii * nblocksh + jj];
-            block->first_row = ii * BLOCK_DIM;
-            block->first_col = jj * BLOCK_DIM;
-            block->num_rows = std::min(BLOCK_DIM, nrows - 1 - block->first_row);
-            block->num_cols = std::min(BLOCK_DIM, ncols - 1 - block->first_col);
+            block->first_row = ii * block_dim;
+            block->first_col = jj * block_dim;
+            block->num_rows = std::min(block_dim, nrows - 1 - block->first_row);
+            block->num_cols = std::min(block_dim, ncols - 1 - block->first_col);
         }
     }
-
-    std::cout << "Initialization time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - init_start).count()
-        << " microseconds\n";
-    auto p1_start = Time::now();
+    profileTime("Initialization");
 
     // Phase 1: generate segments in each square (in parallel)
     int block_num;
-    omp_set_num_threads(num_threads);
-    printf("max threads: %d\n", omp_get_max_threads());
     # pragma omp parallel default(shared) private(block_num)
     {
         # pragma omp for schedule(static) nowait
@@ -540,12 +566,11 @@ int main(int argc, char **argv) {
             }
         }
     }
-    std::cout << "Phase 1 time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p1_start).count() << " microseconds\n";
+    profileTime("Phase 1");
 
     // Phase 2: join adjacent segments into contours
     std::vector<Contour *> contours;
-        
-    auto p2_start = Time::now();
+
     size_t i;
     # pragma omp parallel default (shared) private(i)
     {
@@ -556,7 +581,7 @@ int main(int argc, char **argv) {
             traverseClosedContours(level, &contours);
         }
     }
-    std::cout << "Phase 2, time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
+    profileTime("Phase 2");
 
 
     char output_filename[100];
