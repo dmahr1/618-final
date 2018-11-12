@@ -307,7 +307,10 @@ void traverseNonClosedContours(const val_t level, std::vector<Contour*> *const c
         if (lookupSegmentInSquare(&segment, level, square, Side::TOP, true)) {
             Contour *contour = traverseContour(level, square, segment);
             contour->is_closed = false;
-            contours->push_back(contour);
+            # pragma omp critical
+            {
+                contours->push_back(contour);
+            }
         }
     }
     // Check squares in right column, exclusive of square in bottom row
@@ -316,7 +319,10 @@ void traverseNonClosedContours(const val_t level, std::vector<Contour*> *const c
         if (lookupSegmentInSquare(&segment, level, square, Side::RIGHT, true)) {
             Contour *contour = traverseContour(level, square, segment);
             contour->is_closed = false;
-            contours->push_back(contour);
+            # pragma omp critical
+            {
+                contours->push_back(contour);
+            }
         }
     }
     // Check squares in bottom row, exclusive of square in leftmost column
@@ -325,7 +331,10 @@ void traverseNonClosedContours(const val_t level, std::vector<Contour*> *const c
         if (lookupSegmentInSquare(&segment, level, square, Side::BOTTOM, true)) {
             Contour *contour = traverseContour(level, square, segment);
             contour->is_closed = false;
-            contours->push_back(contour);
+            # pragma omp critical
+            {
+                contours->push_back(contour);
+            }
         }
     }
     // Check squares in left column, exclusive of square in top row
@@ -334,7 +343,10 @@ void traverseNonClosedContours(const val_t level, std::vector<Contour*> *const c
         if (lookupSegmentInSquare(&segment, level, square, Side::LEFT, true)) {
             Contour *contour = traverseContour(level, square, segment);
             contour->is_closed = false;
-            contours->push_back(contour);
+            # pragma omp critical
+            {
+                contours->push_back(contour);
+            }
         }
     }
 }
@@ -347,7 +359,10 @@ void traverseClosedContours(const val_t level, std::vector<Contour*> *const cont
         if (lookupSegmentInSquare(&segment, level, square, Side::ANY, true)) {
             Contour *contour = traverseContour(level, square, segment);
             contour->is_closed = true;
-            contours->push_back(contour);
+            # pragma omp critical
+            {
+                contours->push_back(contour);
+            }
         }
     }
 }
@@ -527,19 +542,21 @@ int main(int argc, char **argv) {
     }
     std::cout << "Phase 1 time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p1_start).count() << " microseconds\n";
 
-    return 0;
-
     // Phase 2: join adjacent segments into contours
     std::vector<Contour *> contours;
-
-    for (const auto& level : levels) {
-        auto p2_start = Time::now();
-        traverseNonClosedContours(level, &contours);
-        // std::cout << "Phase 2.1, level "<< level << " time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
-        p2_start = Time::now();
-        traverseClosedContours(level, &contours);
-        // std::cout << "Phase 2.2, level "<< level << " time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
+        
+    auto p2_start = Time::now();
+    size_t i;
+    # pragma omp parallel default (shared) private(i)
+    {
+        # pragma omp for schedule(static) nowait
+        for (i = 0; i < levels.size(); i++) {
+            const auto& level = levels[i];
+            traverseNonClosedContours(level, &contours);
+            traverseClosedContours(level, &contours);
+        }
     }
+    std::cout << "Phase 2, time: " << std::chrono::duration_cast<std::chrono::microseconds>(Time::now() - p2_start).count() << " microseconds\n";
 
 
     char output_filename[100];
