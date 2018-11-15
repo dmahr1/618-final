@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <random>
 #include <unordered_map>
 #include <vector>
@@ -81,15 +83,32 @@ typedef struct {
 typedef struct {
     std::vector<Point> line_string;
     val_t level;
+    bool visited;
     bool is_closed;
+    coord_t start_side_idx;
+    coord_t end_side_idx;
 } Contour;
+
+struct pair_hash {
+    // Using pair hash from https://stackoverflow.com/a/32685618/1254992
+    std::size_t operator () (const std::pair<val_t, int> &p) const {
+        auto h1 = std::hash<val_t>{}(p.first);
+        auto h2 = std::hash<int>{}(p.second);
+        return h1 ^ h2;
+    }
+};
+
+typedef std::pair<val_t, int> SegmentKey;
 
 typedef struct {
     int first_row;
     int first_col;
     int num_rows;
     int num_cols;
-    // std::unordered_multimap<SegmentKey, Segment> segments; // For later
+    std::unordered_multimap<SegmentKey, Segment, pair_hash> segments;
+    std::unordered_multimap<SegmentKey, Segment, pair_hash> inbound_segments;
+    std::unordered_multimap<SegmentKey, Contour, pair_hash> contours;
+    std::unordered_multimap<SegmentKey, Contour, pair_hash> inbound_contours;
 } Block;
 
 using Time = std::chrono::high_resolution_clock;
@@ -144,11 +163,11 @@ float get_option_float(const char *option_name, float default_value) {
 }
 
 // Populate square with top-left pixel at (row, col).
-void populateSquare(Square *const square, const int row, const int col,
+void processSquare(Block *const block, const int row, const int col,
         const std::vector<val_t>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
-    square->row = row;
-    square->col = col;
+
+    int square_idx = row * (ncols - 1) + col;
 
     // Get pixel values at corners around this square
     val_t ll = input_array[(row + 1) * ncols + col];
@@ -177,69 +196,72 @@ void populateSquare(Square *const square, const int row, const int col,
         coord_t left = (coord_t) col;
 
         switch(key) {
+
+            // TODO: Add conditional logic for inbound segments
+
             // Cases where 1 pixel is above the level
             case (LL_ABOVE): // Case 1 = 0001
-                square->segments.insert({level, Segment(Side::LEFT, Side::BOTTOM,
+                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (LR_ABOVE): // Case 2 = 0010
-                square->segments.insert({level, Segment(Side::BOTTOM, Side::RIGHT,
+                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UR_ABOVE): // Case  4 = 0100
-                square->segments.insert({level, Segment(Side::RIGHT, Side::TOP,
+                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE): // Case  8 = 1000
-                square->segments.insert({level, Segment(Side::TOP, Side::LEFT,
+                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             // Cases where 3 pixels are above the level
             case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
-                square->segments.insert({level, Segment(Side::LEFT, Side::TOP,
+                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
-                square->segments.insert({level, Segment(Side::TOP, Side::RIGHT,
+                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
-                square->segments.insert({level, Segment(Side::RIGHT, Side::BOTTOM,
+                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
-                square->segments.insert({level, Segment(Side::BOTTOM, Side::LEFT,
+                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             // Cases where 2 adjacent pixels are above the level
             case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
-                square->segments.insert({level, Segment(Side::LEFT, Side::RIGHT,
+                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
-                square->segments.insert({level, Segment(Side::BOTTOM, Side::TOP,
+                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
-                square->segments.insert({level, Segment(Side::TOP, Side::BOTTOM,
+                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
-                square->segments.insert({level, Segment(Side::RIGHT, Side::LEFT,
+                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             // TODO(maybe): disambiguate saddle points.
             // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
             case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
-                square->segments.insert({level, Segment(Side::LEFT, Side::TOP,
+                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
-                square->segments.insert({level, Segment(Side::RIGHT, Side::BOTTOM,
+                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
-                square->segments.insert({level, Segment(Side::TOP, Side::RIGHT,
+                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
-                square->segments.insert({level, Segment(Side::BOTTOM, Side::LEFT,
+                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
         }
@@ -308,73 +330,50 @@ Contour* traverseContour(val_t level, Square *starting_square, Segment *starting
     return contour;
 }
 
-void traverseNonClosedContours(const val_t level, std::vector<Contour*> *const contours) {
-    Segment *segment = NULL;
-    int row = 0, col = 0;
-    // Check squares in top row, exclusive of square in rightmost column
-    for (; col < ncols - 2; col++) {
-        Square *square = &squares[row * (ncols - 1) + col];
-        if (lookupSegmentInSquare(&segment, level, square, Side::TOP, true)) {
-            Contour *contour = traverseContour(level, square, segment);
-            contour->is_closed = false;
-            # pragma omp critical
-            {
-                contours->push_back(contour);
-            }
-        }
+void traverseNonClosedContours(Block *const block, const val_t level) {
+    const Segment *segment = NULL;
+
+    // Iterate over all inbound segments, i.e. that start on the edge of this block
+    for (const auto& kv_pair : block->inbound_segments) {
+        val_t level = kv_pair.first.first;
+        int square_idx = kv_pair.first.second;
+        segment = &(kv_pair.second);
+
+        // TODO: Traverse starting from this segment
+        level = level;
+        square_idx = square_idx;
+        segment = segment;
+
     }
-    // Check squares in right column, exclusive of square in bottom row
-    for (; row < nrows - 2; row++) {
-        Square *square = &squares[row * (ncols - 1) + col];
-        if (lookupSegmentInSquare(&segment, level, square, Side::RIGHT, true)) {
-            Contour *contour = traverseContour(level, square, segment);
-            contour->is_closed = false;
-            # pragma omp critical
-            {
-                contours->push_back(contour);
-            }
-        }
-    }
-    // Check squares in bottom row, exclusive of square in leftmost column
-    for (; col > 0; col--) {
-        Square *square = &squares[row * (ncols - 1) + col];
-        if (lookupSegmentInSquare(&segment, level, square, Side::BOTTOM, true)) {
-            Contour *contour = traverseContour(level, square, segment);
-            contour->is_closed = false;
-            # pragma omp critical
-            {
-                contours->push_back(contour);
-            }
-        }
-    }
-    // Check squares in left column, exclusive of square in top row
-    for (; row > 0; row--) {
-        Square *square = &squares[row * (ncols - 1) + col];
-        if (lookupSegmentInSquare(&segment, level, square, Side::LEFT, true)) {
-            Contour *contour = traverseContour(level, square, segment);
-            contour->is_closed = false;
-            # pragma omp critical
-            {
-                contours->push_back(contour);
-            }
-        }
-    }
+
 }
 
-void traverseClosedContours(const val_t level, std::vector<Contour*> *const contours) {
-    // Iterate over all squares, begin traversal at any unvisited segments
-    for (int idx = 0; idx < (nrows - 1) * (ncols - 1); idx++) {
-        Square *square = &squares[idx];
-        Segment *segment = NULL;
-        if (lookupSegmentInSquare(&segment, level, square, Side::ANY, true)) {
-            Contour *contour = traverseContour(level, square, segment);
-            contour->is_closed = true;
-            # pragma omp critical
-            {
-                contours->push_back(contour);
-            }
+void traverseClosedContours(Block *const block, const val_t level) {
+
+    // Iterate over all segments
+    for (const auto& kv_pair : block->segments) {
+        val_t level = kv_pair.first.first;
+        int square_idx = kv_pair.first.second;
+        Segment segment = kv_pair.second;
+        if (segment.visited) {
+            continue;
         }
+
+        // TODO: Traverse starting from this segment
+        level = level;
+        square_idx = square_idx;
+        segment = segment;
+
     }
+
+}
+
+void traverseNonClosedContourFragments(const val_t level, std::vector<std::list<Contour>> *output_contours) {
+    return;
+}
+
+void traverseClosedContourFragments(const val_t level, std::vector<std::list<Contour>> *output_contours) {
+    return;
 }
 
 void countSegments(int *total_segments = nullptr, int *unvisited_segments = nullptr) {
@@ -406,11 +405,11 @@ inline Point transformPoint(Point point) {
     return point;
 }
 
-void printGeoJSON(FILE *output, const std::vector<Contour *> contours) {
+void printGeoJSON(FILE *output, const std::vector<std::list<Contour>> output_contours) {
     fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
     size_t i;
-    for (i = 0; i < contours.size(); i++) {
-        Contour *contour = contours[i];
+    for (i = 0; i < output_contours.size(); i++) {
+        const Contour *contour = &(output_contours[i].front());
         fprintf(output, "{ \"type\":\"Feature\", ");
         fprintf(output, "\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
                 contour->level, (contour->is_closed) ? "true" : "false");
@@ -422,7 +421,7 @@ void printGeoJSON(FILE *output, const std::vector<Contour *> contours) {
         }
         Point pt = transformPoint(contour->line_string[j]);
         fprintf(output, "[%.8lf,%.8lf] ] } }", pt.x, pt.y);
-        fprintf(output, "%s\n", (i < contours.size() - 1) ? "," : "");
+        fprintf(output, "%s\n", (i < output_contours.size() - 1) ? "," : "");
     }
     fprintf(output, "] } \n");
 }
@@ -507,7 +506,7 @@ int main(int argc, char **argv) {
     // Initialize data structures that are proportional to the raster size. Since squares are gaps
     // between pixels, Square should have (nrows-1) * (ncols-1) elements.
     input_array = new val_t[nrows * ncols];
-    squares = new Square[(nrows - 1) * (ncols - 1)];
+    // squares = new Square[(nrows - 1) * (ncols - 1)];
 
     // We will compute the min and max elevations in the input to determine what levels to generate
     // contours at.
@@ -558,36 +557,42 @@ int main(int argc, char **argv) {
     {
         # pragma omp for schedule(static) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
+
+            // Phase 1
             Block *block = &blocks[block_num];
             for (int i = block->first_row; i < block->first_row + block->num_rows; i++) {
                 for (int j = block->first_col; j < block->first_col + block->num_cols; j++) {
-                    populateSquare(&squares[i * (ncols - 1) + j], i, j, levels);
+                    processSquare(block, i, j, levels);
                 }
             }
+
+            // Phase 2
+            for (size_t i = 0; i < levels.size(); i++) {
+                const auto& level = levels[i];
+                traverseNonClosedContours(block, level);
+                traverseClosedContours(block, level);
+            }
+
         }
     }
-    profileTime("Phase 1");
 
-    // Phase 2: join adjacent segments into contours
-    std::vector<Contour *> contours;
-
+    // Phase 3
+    std::vector<std::list<Contour>> output_contours;
     size_t i;
     # pragma omp parallel default (shared) private(i)
     {
         # pragma omp for schedule(static) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
-            traverseNonClosedContours(level, &contours);
-            traverseClosedContours(level, &contours);
+            traverseNonClosedContourFragments(level, &output_contours);
+            traverseClosedContourFragments(level, &output_contours);
         }
     }
-    profileTime("Phase 2");
-
 
     char output_filename[100];
     sprintf(output_filename, "output_%s.txt", basename(input_filename));
     FILE *output_file = fopen(output_filename, "w");
-    printGeoJSON(output_file, contours);
+    printGeoJSON(output_file, output_contours);
     fclose(output_file);
 
     return 0;
