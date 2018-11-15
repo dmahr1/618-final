@@ -24,6 +24,7 @@ constexpr uint8_t LL_ABOVE = 1;
 // Structs and typedefs
 typedef double val_t;
 typedef double coord_t;
+typedef int side_t;
 
 typedef struct {
     coord_t x;
@@ -60,13 +61,14 @@ struct Segment {
             const coord_t top, const coord_t left, const val_t ll,
             const val_t lr, const val_t ur, const val_t ul) :
 
-        start_side(side_start), end_side(side_end), visited(false) {
+        visited(false) {
         start = interpolatePoint(side_start, level, top, left, ll, lr, ur, ul);
         end = interpolatePoint(side_end, level, top, left, ll, lr, ur, ul);
+        // TODO: set side_start_idx and side_end_idx from square_idx
     }
 
-    Side start_side;
-    Side end_side;
+    side_t side_start_idx;
+    side_t side_end_idx;
     bool visited;
     Point start;
     Point end;
@@ -162,6 +164,20 @@ float get_option_float(const char *option_name, float default_value) {
     return default_value;
 }
 
+side_t getSideIndex(int square_row, int square_col, Side side) {
+    // TODO: Add conversion from square indices to side index
+
+    // Assume horizontal sides are numbered first, then vertical.
+    // NOTE: THIS USES NROWS AND NCOLS INCORRECTLY!!!!!
+    // For square at row,col = i,j:
+    // top = i * ncols + j
+    // bottom = (i+1) * ncols + j
+    // left = (nrows + 1) * ncols + i * (ncols + 1) + j
+    // right = (nrows + 1) * ncols + i * (ncols + 1) + j + 1
+
+    return 0;
+}
+
 // Populate square with top-left pixel at (row, col).
 void processSquare(Block *const block, const int row, const int col,
         const std::vector<val_t>& levels) {
@@ -195,140 +211,146 @@ void processSquare(Block *const block, const int row, const int col,
         coord_t top = (coord_t) row;
         coord_t left = (coord_t) col;
 
-        switch(key) {
+        // TODO: Add conditional logic for inbound segments
+        std::unordered_multimap<SegmentKey, Segment, pair_hash> *destination;
+        if (true ) { // inbound segment
+            destination = &(block->inbound_segments);
+        } else {
+            destination = &(block->segments);
+        }
 
-            // TODO: Add conditional logic for inbound segments
+        switch(key) {
 
             // Cases where 1 pixel is above the level
             case (LL_ABOVE): // Case 1 = 0001
-                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::BOTTOM,
+                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (LR_ABOVE): // Case 2 = 0010
-                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::RIGHT,
+                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UR_ABOVE): // Case  4 = 0100
-                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::TOP,
+                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE): // Case  8 = 1000
-                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::LEFT,
+                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             // Cases where 3 pixels are above the level
             case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
-                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
+                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
-                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
+                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
-                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
+                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
-                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
+                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             // Cases where 2 adjacent pixels are above the level
             case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
-                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::RIGHT,
+                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
-                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::TOP,
+                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
-                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::BOTTOM,
+                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
-                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::LEFT,
+                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             // TODO(maybe): disambiguate saddle points.
             // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
             case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
-                block->segments.insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
+                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
                         level, top, left, ll, lr, ur, ul)});
-                block->segments.insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
+                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
                         level, top, left, ll, lr, ur, ul)});
                 break;
             case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
-                block->segments.insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
+                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
                         level, top, left, ll, lr, ur, ul)});
-                block->segments.insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
+                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
                         level, top, left, ll, lr, ur, ul)});
                 break;
         }
     }
 }
 
-// Find (unvisited) segment at given level starting from given side in given square
-bool lookupSegmentInSquare(Segment **segment, val_t level, Square *square, Side start_side,
-        bool unvisited_only) {
-    int num_segments_found = 0;
-    auto range = square->segments.equal_range(level);
-    for (auto iter = range.first; iter != range.second; iter++) {
-        if ((start_side == Side::ANY || iter->second.start_side == start_side) &&
-                (!unvisited_only || iter->second.visited == false)) {
-            *segment = &(iter->second);
-            num_segments_found++;
-        }
-    }
-    assert(num_segments_found <= 1); // Should never have 2+ segments with same square/level/side
-    return num_segments_found == 1;
-}
+// // Find (unvisited) segment at given level starting from given side in given square
+// bool lookupSegmentInSquare(Segment **segment, val_t level, Square *square, Side start_side,
+//         bool unvisited_only) {
+//     int num_segments_found = 0;
+//     auto range = square->segments.equal_range(level);
+//     for (auto iter = range.first; iter != range.second; iter++) {
+//         if ((start_side == Side::ANY || iter->second.start_side == start_side) &&
+//                 (!unvisited_only || iter->second.visited == false)) {
+//             *segment = &(iter->second);
+//             num_segments_found++;
+//         }
+//     }
+//     assert(num_segments_found <= 1); // Should never have 2+ segments with same square/level/side
+//     return num_segments_found == 1;
+// }
 
-// Go from segment at level in square to next segment, updating points in-place
-bool traverseToNextSegment(Square **square, Segment **segment, val_t level) {
+// // Go from segment at level in square to next segment, updating points in-place
+// bool traverseToNextSegment(Square **square, Segment **segment, val_t level) {
 
-    // Traverse left
-    if ((*segment)->end_side == Side::LEFT && (*square)->col > 0) {
-        *square = *square - 1;
-        return lookupSegmentInSquare(segment, level, *square, Side::RIGHT, true);
-    // Traverse right
-    } else if ((*segment)->end_side == Side::RIGHT && (*square)->col < ncols - 2) {
-        *square = *square + 1;
-        return lookupSegmentInSquare(segment, level, *square, Side::LEFT, true);
-    // Traverse up
-    } else if ((*segment)->end_side == Side::TOP && (*square)->row > 0) {
-        *square = *square - (ncols - 1);
-        return lookupSegmentInSquare(segment, level, *square, Side::BOTTOM, true);
-    // Traverse down
-    } else if ((*segment)->end_side == Side::BOTTOM && (*square)->row < nrows - 2) {
-        *square = *square + (ncols - 1);
-        return lookupSegmentInSquare(segment, level, *square, Side::TOP, true);
-    // Hit the edge of the raster, can't go any farther!
-    } else {
-        return false;
-    }
+//     // Traverse left
+//     if ((*segment)->end_side == Side::LEFT && (*square)->col > 0) {
+//         *square = *square - 1;
+//         return lookupSegmentInSquare(segment, level, *square, Side::RIGHT, true);
+//     // Traverse right
+//     } else if ((*segment)->end_side == Side::RIGHT && (*square)->col < ncols - 2) {
+//         *square = *square + 1;
+//         return lookupSegmentInSquare(segment, level, *square, Side::LEFT, true);
+//     // Traverse up
+//     } else if ((*segment)->end_side == Side::TOP && (*square)->row > 0) {
+//         *square = *square - (ncols - 1);
+//         return lookupSegmentInSquare(segment, level, *square, Side::BOTTOM, true);
+//     // Traverse down
+//     } else if ((*segment)->end_side == Side::BOTTOM && (*square)->row < nrows - 2) {
+//         *square = *square + (ncols - 1);
+//         return lookupSegmentInSquare(segment, level, *square, Side::TOP, true);
+//     // Hit the edge of the raster, can't go any farther!
+//     } else {
+//         return false;
+//     }
 
-}
+// }
 
-Contour* traverseContour(val_t level, Square *starting_square, Segment *starting_segment) {
+// Contour* traverseContour(val_t level, Square *starting_square, Segment *starting_segment) {
 
-    // Initialize the contour with the first two vertices
-    Contour *contour = new Contour();
-    contour->level = level;
-    contour->line_string.push_back(starting_segment->start);
-    contour->line_string.push_back(starting_segment->end);
-    starting_segment->visited = true;
+//     // Initialize the contour with the first two vertices
+//     Contour *contour = new Contour();
+//     contour->level = level;
+//     contour->line_string.push_back(starting_segment->start);
+//     contour->line_string.push_back(starting_segment->end);
+//     starting_segment->visited = true;
 
-    // Traverse through all connected segments
-    Square *current_square = starting_square;
-    Segment *current_segment = starting_segment;
-    while (traverseToNextSegment(&current_square, &current_segment, level)) {
-        contour->line_string.push_back(current_segment->end);
-        current_segment->visited = true;
-    }
+//     // Traverse through all connected segments
+//     Square *current_square = starting_square;
+//     Segment *current_segment = starting_segment;
+//     while (traverseToNextSegment(&current_square, &current_segment, level)) {
+//         contour->line_string.push_back(current_segment->end);
+//         current_segment->visited = true;
+//     }
 
-    return contour;
-}
+//     return contour;
+// }
 
 void traverseNonClosedContours(Block *const block, const val_t level) {
     const Segment *segment = NULL;
