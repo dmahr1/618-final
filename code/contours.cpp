@@ -556,7 +556,7 @@ int main(int argc, char **argv) {
     int block_num;
     # pragma omp parallel default(shared) private(block_num)
     {
-        # pragma omp for schedule(static) nowait
+        # pragma omp for schedule(dynamic) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
             Block *block = &blocks[block_num];
             for (int i = block->first_row; i < block->first_row + block->num_rows; i++) {
@@ -574,7 +574,7 @@ int main(int argc, char **argv) {
     size_t i;
     # pragma omp parallel default (shared) private(i)
     {
-        # pragma omp for schedule(static) nowait
+        # pragma omp for schedule(dynamic) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
             traverseNonClosedContours(level, &contours);
