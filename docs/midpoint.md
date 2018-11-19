@@ -4,6 +4,8 @@
 
 **Dan Mahr (dmahr) and Justin Wang (jcwang1)**
 
+[https://dmahr1.github.io/618-final/midpoint.html](https://dmahr1.github.io/618-final/midpoint.html)
+
 Our project is about parallelizing the generation of contour lines. This is a common operation when visualizing a 2D scalar field. For example, topographic maps have contour lines generated from digital elevation models, where each line represents a path of equal elevation. While elevation contours are far from the only application of this problem, we have found them to be useful for building our intuition, and thus we refer to elevation throughout this report.
 
 ## Progress on Goals and Deliverables
@@ -11,11 +13,11 @@ Our project is about parallelizing the generation of contour lines. This is a co
 ### Goal 1: Marching squares
 Implementing the core marching squares algorithm was relatively straightforward. Given an input, (H x W) array of “pixels”, we define create an ((H - 1) x (W - 1)) array of “squares”. Each square is defined by its four corner pixels. For a given contour “level”, e.g. the 100 meter elevation line, each square falls into one of sixteen cases depending on which of its four corners are above or below the level.
 
-![Marching squares cases](MarchingSquares_Page_1.png)
+<img src="MarchingSquares_Page_1.png" alt="Marching squares cases" width=650/>
 
 For cases 0 and 15, all four pixels are above or below the level, so there is no contour boundary to add to that square (at that level). For the remaining cases, we need to add a segment which will eventually be part of a continuous contour line. For cases 5 and 10, we need to add two segments since the square is a “saddle”. The starting and endpoint points of each segment are calculated by linearly interpolating between the two pixel values on each edge. Note that the order of segment endpoints matters: we require that all segments be oriented such that the larger pixel value is always on the right hand side of the segment, e.g. contour lines always go clockwise around hills. This consistent orientation is crucial to our algorithm's correctness and efficiency.
 
-![Marching squares cases](MarchingSquares_Page_2.png)
+<img src="MarchingSquares_Page_2.png" alt="Marching squares blocks" width=650/>
 
 Adding parallelization to marching squares is straightforward since each square can be processed independently by reading the four pixel values at its corners. We spatially decomposed the input array into “blocks” so that a thread handles all squares in one block within one iteration of the OpenMP `parallel for` loop. By using these square blocks with minimal perimeter-to-area ratio, we minimize the number of pixel values that have to be loaded from memory by multiple threads, improving temporal locality and reducing the number of duplicative reads. The size of one block is an optional command-line argument: in the figure above, the blocks are only 4 squares by 4 squares; our default block size is 32 squares by 32 squares.
 
