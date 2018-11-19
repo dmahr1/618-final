@@ -51,7 +51,11 @@ Phase 1 is when each thread runs the core marching squares algorithm for all squ
 
 In phase 1, we achieved only a modest 2x speedup, regardless of the size of the blocks. Considering that marching squares is embarrassingly parallel, we concluded that our implementation of this phase is memory bound. In order to reduce memory overhead, we plan to restructure Phase 1 so that each thread joins all of its block’s segments across all levels into contour line “fragments”; this means that the producer and consumer of segment data is always the same thread, improving temporal locality.
 
+![phase1_results](phase1_midpoint.png)
+
 In phase 2, we see a steady, albeit sub-linear speedup across levels. We also believe that this suffers from memory constraints, though not as severely as Phase 1, and that the aforementioned restructuring will dramatically reduce memory utilization in this phase.
+
+![phase2_results](phase2_midpoint.png)
 
 ### Performance with a space-filling contour line
 
