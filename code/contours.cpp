@@ -24,7 +24,6 @@ constexpr uint8_t LL_ABOVE = 1;
 // Structs and typedefs
 typedef double val_t;
 typedef double coord_t;
-typedef int side_t;
 
 typedef struct {
     coord_t x;
@@ -64,23 +63,17 @@ struct Segment {
         visited(false) {
         start = interpolatePoint(side_start, level, top, left, ll, lr, ur, ul);
         end = interpolatePoint(side_end, level, top, left, ll, lr, ur, ul);
-        // TODO: set side_start_idx and side_end_idx from square_idx
+        // TODO: set side_start_idx and side_end_idx from segment_index
     }
 
-    side_t side_start_idx;
-    side_t side_end_idx;
+    int side_start_idx;
+    int side_end_idx;
     bool visited;
     Point start;
     Point end;
 };
 
 typedef struct Segment Segment;
-
-typedef struct {
-    std::unordered_multimap<val_t, Segment> segments;
-    int row;
-    int col;
-} Square;
 
 typedef struct {
     std::vector<Point> line_string;
@@ -107,9 +100,9 @@ typedef struct {
     int first_col;
     int num_rows;
     int num_cols;
-    std::unordered_multimap<SegmentKey, Segment, pair_hash> segments;
+    std::unordered_multimap<SegmentKey, Segment, pair_hash> interior_segments;
     std::unordered_multimap<SegmentKey, Segment, pair_hash> inbound_segments;
-    std::unordered_multimap<SegmentKey, Contour, pair_hash> contours;
+    std::unordered_multimap<SegmentKey, Contour, pair_hash> interior_contours;
     std::unordered_multimap<SegmentKey, Contour, pair_hash> inbound_contours;
 } Block;
 
@@ -131,7 +124,6 @@ coord_t pixel_size;
 // Globals from other places
 FILE *input_file;
 val_t *input_array;
-Square *squares;
 int nblocksh, nblocksv;
 Block *blocks;
 auto prev_time = Time::now();
@@ -164,26 +156,52 @@ float get_option_float(const char *option_name, float default_value) {
     return default_value;
 }
 
-side_t getSideIndex(int square_row, int square_col, Side side) {
-    // TODO: Add conversion from square indices to side index
-
+int computeSideIndex(int square_row, int square_col, Side side) {
     // Assume horizontal sides are numbered first, then vertical.
-    // NOTE: THIS USES NROWS AND NCOLS INCORRECTLY!!!!!
-    // For square at row,col = i,j:
-    // top = i * ncols + j
-    // bottom = (i+1) * ncols + j
-    // left = (nrows + 1) * ncols + i * (ncols + 1) + j
-    // right = (nrows + 1) * ncols + i * (ncols + 1) + j + 1
+    switch(side) {
+        case (Side::TOP):
+            return square_row * (ncols - 1) + square_col;
+        case (Side::BOTTOM):
+            return (square_row + 1) * (ncols - 1) + square_col;
+        case (Side::LEFT):
+            return nrows * (ncols - 1) + square_row * ncols + square_col;
+        case (Side::RIGHT):
+            return nrows * (ncols - 1) + square_row * ncols + square_col + 1;
+        case (Side::ANY):
+            printf("side argument to computeSideIndex cannot be Side::ANY\n");
+            exit(-1);
+        default:
+            printf("invalid Side enum\n");
+            exit(-1);
+    }
+}
 
-    return 0;
+bool segmentIsInboundToBlock(const Block *const block, const int row,
+        const int col, const Side side) {
+    switch (side) {
+        case (Side::TOP):
+            return row == block->first_row;
+        case (Side::BOTTOM):
+            return row == block->first_row + block->num_rows - 1;
+        case (Side::LEFT):
+            return col == block->first_col;
+        case (Side::RIGHT):
+            return col == block->first_col + block->num_rows - 1;
+        case (Side::ANY):
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "without specifying starting side (passed Side::ANY)\n");
+            exit(-1);
+        default:
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "with invalid Side\n");
+            exit(-1);
+    }
 }
 
 // Populate square with top-left pixel at (row, col).
 void processSquare(Block *const block, const int row, const int col,
         const std::vector<val_t>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
-
-    int square_idx = row * (ncols - 1) + col;
 
     // Get pixel values at corners around this square
     val_t ll = input_array[(row + 1) * ncols + col];
@@ -211,83 +229,74 @@ void processSquare(Block *const block, const int row, const int col,
         coord_t top = (coord_t) row;
         coord_t left = (coord_t) col;
 
-        // TODO: Add conditional logic for inbound segments
-        std::unordered_multimap<SegmentKey, Segment, pair_hash> *destination;
-        if (true ) { // inbound segment
-            destination = &(block->inbound_segments);
-        } else {
-            destination = &(block->segments);
-        }
 
+        std::vector<std::pair<Side, Side>> start_end_sides;
+
+        int segment_index;
         switch(key) {
-
             // Cases where 1 pixel is above the level
             case (LL_ABOVE): // Case 1 = 0001
-                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::BOTTOM,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::LEFT, Side::BOTTOM});
                 break;
             case (LR_ABOVE): // Case 2 = 0010
-                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::RIGHT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::BOTTOM, Side::RIGHT});
                 break;
             case (UR_ABOVE): // Case  4 = 0100
-                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::TOP,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::RIGHT, Side::TOP});
                 break;
             case (UL_ABOVE): // Case  8 = 1000
-                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::LEFT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::TOP, Side::LEFT});
                 break;
             // Cases where 3 pixels are above the level
             case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
-                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::LEFT, Side::TOP});
                 break;
             case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
-                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::TOP, Side::RIGHT});
                 break;
             case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
-                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::RIGHT, Side::BOTTOM});
                 break;
             case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
-                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::BOTTOM, Side::LEFT});
                 break;
             // Cases where 2 adjacent pixels are above the level
             case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
-                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::RIGHT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::LEFT, Side::RIGHT});
                 break;
             case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
-                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::TOP,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::BOTTOM, Side::TOP});
                 break;
             case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
-                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::BOTTOM,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::TOP, Side::BOTTOM});
                 break;
             case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
-                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::LEFT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::RIGHT, Side::LEFT});
                 break;
             // TODO(maybe): disambiguate saddle points.
             // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
             case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
-                destination->insert({{level, square_idx}, Segment(Side::LEFT, Side::TOP,
-                        level, top, left, ll, lr, ur, ul)});
-                destination->insert({{level, square_idx}, Segment(Side::RIGHT, Side::BOTTOM,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::LEFT, Side::TOP});
+                start_end_sides.push_back({Side::RIGHT, Side::BOTTOM});
                 break;
             case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
-                destination->insert({{level, square_idx}, Segment(Side::TOP, Side::RIGHT,
-                        level, top, left, ll, lr, ur, ul)});
-                destination->insert({{level, square_idx}, Segment(Side::BOTTOM, Side::LEFT,
-                        level, top, left, ll, lr, ur, ul)});
+                start_end_sides.push_back({Side::TOP, Side::RIGHT});
+                start_end_sides.push_back({Side::BOTTOM, Side::LEFT});
                 break;
         }
-    }
+        // TODO: Add conditional logic for inbound segments
+        for (const auto& start_end_side : start_end_sides) {
+            std::unordered_multimap<SegmentKey, Segment, pair_hash> *destination;
+            if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
+                destination = &(block->inbound_segments);
+            } else {
+                destination = &(block->interior_segments);
+            }
+            segment_index = computeSideIndex(row, col, Side::BOTTOM);
+            destination->insert({{level, segment_index}, Segment(start_end_side.first, start_end_side.second,
+                        level, top, left, ll, lr, ur, ul)});
+        }
+   }
 }
 
 // // Find (unvisited) segment at given level starting from given side in given square
@@ -358,12 +367,12 @@ void traverseNonClosedContours(Block *const block, const val_t level) {
     // Iterate over all inbound segments, i.e. that start on the edge of this block
     for (const auto& kv_pair : block->inbound_segments) {
         val_t level = kv_pair.first.first;
-        int square_idx = kv_pair.first.second;
+        int segment_index = kv_pair.first.second;
         segment = &(kv_pair.second);
 
         // TODO: Traverse starting from this segment
         level = level;
-        square_idx = square_idx;
+        segment_index = segment_index;
         segment = segment;
 
     }
@@ -373,9 +382,9 @@ void traverseNonClosedContours(Block *const block, const val_t level) {
 void traverseClosedContours(Block *const block, const val_t level) {
 
     // Iterate over all segments
-    for (const auto& kv_pair : block->segments) {
+    for (const auto& kv_pair : block->interior_segments) {
         val_t level = kv_pair.first.first;
-        int square_idx = kv_pair.first.second;
+        int segment_index = kv_pair.first.second;
         Segment segment = kv_pair.second;
         if (segment.visited) {
             continue;
@@ -383,7 +392,7 @@ void traverseClosedContours(Block *const block, const val_t level) {
 
         // TODO: Traverse starting from this segment
         level = level;
-        square_idx = square_idx;
+        segment_index = segment_index;
         segment = segment;
 
     }
@@ -398,27 +407,26 @@ void traverseClosedContourFragments(const val_t level, std::vector<std::list<Con
     return;
 }
 
+// TODO: Fix after everything else has been restructured.
 void countSegments(int *total_segments = nullptr, int *unvisited_segments = nullptr) {
-    int total = 0, unvisited = 0;
-    Square *square;
-    for (int idx = 0; idx < (nrows - 1) * (ncols - 1); idx++) {
-        square = &squares[idx];
-        for (auto iter = square->segments.begin(); iter != square->segments.end(); iter++) {
-            total++;
-            if (iter->second.visited == false) {
-                unvisited++;
-            }
-        }
-    }
-    // If int variables were passed in, write to them.
-    if (total_segments != nullptr && unvisited_segments != nullptr) {
-        *total_segments = total;
-        *unvisited_segments = unvisited;
-    // Else just print the results
-    } else {
-        float percent = ((float) total) / ((float) unvisited);
-        printf("Found %i segments, %i (%.2f%%) are unvisited.\n", total, unvisited, percent);
-    }
+//    int total = 0, unvisited = 0;
+//    for (int idx = 0; idx < (nrows - 1) * (ncols - 1); idx++) {
+//        for (auto iter = square->segments.begin(); iter != square->segments.end(); iter++) {
+//            total++;
+//            if (iter->second.visited == false) {
+//                unvisited++;
+//            }
+//        }
+//    }
+//    // If int variables were passed in, write to them.
+//    if (total_segments != nullptr && unvisited_segments != nullptr) {
+//        *total_segments = total;
+//        *unvisited_segments = unvisited;
+//    // Else just print the results
+//    } else {
+//        float percent = ((float) total) / ((float) unvisited);
+//        printf("Found %i segments, %i (%.2f%%) are unvisited.\n", total, unvisited, percent);
+//    }
 }
 
 inline Point transformPoint(Point point) {
@@ -528,7 +536,6 @@ int main(int argc, char **argv) {
     // Initialize data structures that are proportional to the raster size. Since squares are gaps
     // between pixels, Square should have (nrows-1) * (ncols-1) elements.
     input_array = new val_t[nrows * ncols];
-    // squares = new Square[(nrows - 1) * (ncols - 1)];
 
     // We will compute the min and max elevations in the input to determine what levels to generate
     // contours at.
@@ -555,6 +562,7 @@ int main(int argc, char **argv) {
     std::vector<val_t> levels = determineLevels(interval, val_min, val_max);
 
     // Perform spatial decomposition of squares into blocks, each of which will be handled by 1 thread
+    // Note: There are (nrow - 1) x (ncols - 1) squares, i.e. one less than the respective pixel dimensions.
     nblocksh = (ncols - 1 + block_dim - 1) / block_dim;
     nblocksv = (nrows - 1 + block_dim - 1) / block_dim;
     printf("Input file = %s, num threads = %d, block size = %d\n",
