@@ -83,19 +83,22 @@ int computeSideIndex(int square_row, int square_col, Side side) {
 }
 
 struct Segment {
-    Segment(const Side side_start, const Side side_end,
-            const int side_start_idx, const int end_side_index, const val_t level,
+    Segment(const Side start_side, const Side end_side,
+            const int square_row, const int square_col,
+            const val_t level, const bool is_inbound_to_raster,
             const coord_t top, const coord_t left, const val_t ll,
             const val_t lr, const val_t ur, const val_t ul) :
-        side_start_idx(side_start_idx), end_side_index(end_side_index),
-        visited(false) {
-        start = interpolatePoint(side_start, level, top, left, ll, lr, ur, ul);
-        end = interpolatePoint(side_end, level, top, left, ll, lr, ur, ul);
+        square_row(square_row), square_col(square_col), end_side(end_side),
+        visited(false), is_inbound_to_raster(is_inbound_to_raster) {
+        start = interpolatePoint(start_side, level, top, left, ll, lr, ur, ul);
+        end = interpolatePoint(end_side, level, top, left, ll, lr, ur, ul);
     }
 
-    int side_start_idx;
-    int end_side_index;
+    int square_row;
+    int square_col;
+    Side end_side;
     bool visited;
+    bool is_inbound_to_raster;
     Point start;
     Point end;
 };
@@ -104,20 +107,21 @@ typedef struct Segment Segment;
 
 struct Contour {
     Contour(const std::shared_ptr<std::vector<Point>>& line_string,
-            const val_t& level, int start_side_idx, int end_side_idx) :
+            const val_t& level, int start_side_idx, int end_side_idx, Side end_side) :
         line_string(line_string), level(level), start_side_idx(start_side_idx),
-        end_side_idx(end_side_idx), visited(false), is_closed(false) {}
+        end_side_idx(end_side_idx), end_side(end_side), visited(false), is_closed(false) {}
 
     std::shared_ptr<std::vector<Point>> line_string;
     val_t level;
     int start_side_idx;
     int end_side_idx;
+    Side end_side;
     bool visited;
     // TODO: Consider whether this is still necessary?
     bool is_closed;
 };
 
-typedef struct Contour Contour;
+typedef struct Contour ContourFragment;
 
 struct pair_hash {
     // Using pair hash from https://stackoverflow.com/a/32685618/1254992.
@@ -135,10 +139,10 @@ typedef struct {
     int first_col;
     int num_rows;
     int num_cols;
-    std::unordered_multimap<SegmentKey, Segment, pair_hash> interior_segments;
-    std::unordered_multimap<SegmentKey, Segment, pair_hash> inbound_segments;
-    std::unordered_multimap<val_t, Contour, pair_hash> closed_fragments;
-    std::unordered_multimap<val_t, Contour, pair_hash> nonclosed_fragments;
+    std::unordered_map<SegmentKey, Segment, pair_hash> interior_segments;
+    std::unordered_map<SegmentKey, Segment, pair_hash> inbound_segments;
+    std::unordered_map<SegmentKey, ContourFragment, pair_hash> inbound_fragments;
+    std::unordered_map<SegmentKey, ContourFragment, pair_hash> interior_fragments;
 } Block;
 
 // Globals from command line arguments
@@ -207,6 +211,29 @@ bool segmentIsInboundToBlock(const Block *const block, const int row,
                    "with invalid Side\n");
             exit(-1);
     }
+}
+
+bool segmentIsInboundToRaster(const int row, const int col, const Side side) {
+
+    switch (side) {
+        case (Side::TOP):
+            return row == 0;            // Index of the first row of squares
+        case (Side::BOTTOM):
+            return row == nrows - 2;    // Index of the last row of squares
+        case (Side::LEFT):
+            return col == 0;            // Index of the first column of squares
+        case (Side::RIGHT):
+            return col == ncols - 2;    // Index of the last column of squares
+        case (Side::ANY):
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "without specifying starting side (passed Side::ANY)\n");
+            exit(-1);
+        default:
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "with invalid Side\n");
+            exit(-1);
+    }
+
 }
 
 // Populate square whose top-left pixel is  at (row, col).
@@ -302,7 +329,7 @@ void processSquare(Block *const block, const int row, const int col,
 
             // Determine which map this segment should be added to, either the
             // block's inbound_segments map or the block's interior_segments map.
-            std::unordered_multimap<SegmentKey, Segment, pair_hash> *destination;
+            std::unordered_map<SegmentKey, Segment, pair_hash> *destination;
             if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
                 destination = &(block->inbound_segments);
             } else {
@@ -311,11 +338,11 @@ void processSquare(Block *const block, const int row, const int col,
 
             // Construct the segment and add it to the appropriate map
             int start_side_index = computeSideIndex(row, col, start_end_side.first);
-            int end_side_index = computeSideIndex(row, col, start_end_side.second);
+            bool is_inbound_to_raster = segmentIsInboundToRaster(row, col, start_end_side.first);
             destination->insert({{level, start_side_index},
                     Segment(start_end_side.first, start_end_side.second,
-                        start_side_index, end_side_index, level, top,
-                        left, ll, lr, ur, ul)});
+                        row, col, level, is_inbound_to_raster,
+                        top, left, ll, lr, ur, ul)});
         }
    }
 }
@@ -323,7 +350,6 @@ void processSquare(Block *const block, const int row, const int col,
 // Retrieve segment in a block at a level starting at particular side_idx
 Segment * getNextSegment(Block *const block, const val_t& level,
         const int next_start_side_index) {
-    assert(block->interior_segments.count({level, next_start_side_index}) <= 1);
     auto iter = block->interior_segments.find({level, next_start_side_index});
     return iter == block->interior_segments.end() ? nullptr : &(iter->second);
 }
@@ -332,32 +358,44 @@ Segment * getNextSegment(Block *const block, const val_t& level,
 //   until it closes on itself or exits the block, and then add contour
 //   fragment to the specified map.
 void traverseContourFragment(Block *const block, const val_t& level,
-        const int contour_start_side_index, Segment *current_segment,
-        std::unordered_multimap<val_t, Contour, pair_hash> *dest) {
+        const int contour_start_side_index, Segment *current_segment) {
+
+    // Determine which map output contour fragment should be added to
+    std::unordered_map<SegmentKey, ContourFragment, pair_hash> *dest;
+    if (current_segment->is_inbound_to_raster) {
+        dest = &(block->inbound_fragments);
+    } else {
+        dest = &(block->interior_fragments);
+    }
+
     auto line_string = std::make_shared<std::vector<Point>>();
     int contour_end_side_index = -1;
+    Side contour_end_side = Side::ANY;
     line_string->push_back(current_segment->start);
-    line_string->push_back(current_segment->end);
 
     Segment *next_segment;
     while (true) {
-        next_segment = getNextSegment(block, level, current_segment->end_side_index);
+        int end_side_index = computeSideIndex(current_segment->square_row,
+                current_segment->square_col, current_segment->end_side);
+        next_segment = getNextSegment(block, level, end_side_index);
         current_segment->visited = true;
         line_string->push_back(current_segment->end);
         if (next_segment == nullptr || next_segment->visited) {
-            contour_end_side_index = current_segment->end_side_index;
+            contour_end_side_index = end_side_index;
+            contour_end_side = current_segment->end_side;
             break;
         }
         current_segment = next_segment;
     }
 
-    // Kinda ugly code-wise, but constructing the Contour in place feels
+    // Kinda ugly code-wise, but constructing the ContourFragment in place feels
     // like the right thing to do.
     // TODO: Consider whether it can/should be cleaner.
     assert(contour_end_side_index != -1);
-    dest->emplace(std::make_pair<const val_t&, Contour>(
-                level,
-                {line_string, level, contour_start_side_index, contour_end_side_index}));
+    dest->emplace(std::make_pair<SegmentKey, ContourFragment>(
+                {level, contour_start_side_index},
+                {line_string, level, contour_start_side_index,
+                 contour_end_side_index, contour_end_side}));
 }
 
 // Traverse all contour fragments in a block at a level that are non-closed
@@ -371,7 +409,7 @@ void traverseNonClosedContourFragments(Block *const block, const val_t level) {
         int contour_start_side_index = kv_pair.first.second;
         current_segment = &(kv_pair.second);
         traverseContourFragment(block, level, contour_start_side_index,
-                current_segment, &(block->nonclosed_fragments));
+                current_segment);
     }
 }
 
@@ -391,39 +429,106 @@ void traverseClosedContourFragments(Block *const block, const val_t level) {
         val_t level = kv_pair.first.first;
         int contour_start_side_index = kv_pair.first.second;
         traverseContourFragment(block, level, contour_start_side_index,
-                current_segment, &(block->closed_fragments));
+                current_segment);
     }
 }
 
-// Traverse non-closed contours at a level by merging contour fragments
-void traverseNonClosedContours(const val_t level, std::vector<std::list<Contour>> *output_contours) {
-    int block_col = 0, block_row = 0;
-    // Iterate over blocks in top row, exclusive of upper-right corner
-    for (; block_col < nblocksh - 1; block_col++) {
+// Retrieve ContourFragment in neighboring block
+ContourFragment * getNextContour(ContourFragment *current_contour,
+        const int block_row, const int block_col) {
 
+    // Lookup next block based on block and end_side of current contour
+    int next_block_row = block_row, next_block_col = block_col;
+    switch(current_contour->end_side) {
+        case Side::LEFT:
+            next_block_col--;
+            break;
+        case Side::RIGHT:
+            next_block_col++;
+            break;
+        case Side::TOP:
+            next_block_row--;
+            break;
+        case Side::BOTTOM:
+            next_block_row++;
+            break;
+        default:
+            assert(false);
     }
-    // Iterate over blocks in right column, exclusive of lower-right corner
-    for (; block_row < nblocksv - 1; block_row++) {
-
+    // Next block is out of bounds
+    if (next_block_row < 0 || next_block_row > nblocksv - 1 ||
+            next_block_col < 0 || next_block_col > nblocksh - 1) {
+        return nullptr;
     }
-    // Iterate over blocks in bottom row, exclusive of lower-left corner
-    for (; block_col > 0; block_col--) {
 
+    // Lookup next contour in next block
+    Block *next_block = &blocks[next_block_row * nblocksh + next_block_col];
+    return &(next_block->interior_fragments.at(
+            {current_contour->level, current_contour->end_side_idx}));
+}
+
+// Traverse a contour at a level starting at a particular contour fragment
+//   and return it as a linked list of contour fragments
+std::list<ContourFragment *> traverseContour(ContourFragment* current_contour,
+        const int block_row, const int block_col) {
+
+    std::list<ContourFragment *> contour_list;
+    ContourFragment *next_contour;
+    while (true) {
+        next_contour = getNextContour(current_contour, block_row, block_col);
+        current_contour->visited = true;
+        contour_list.push_back(current_contour);
+        if (next_contour == nullptr || next_contour->visited) {
+            break;
+        }
+        current_contour = next_contour;
     }
-    // Iterate over blocks in left column, exclusive of upper-left corner
-    for (; block_row > 0; block_row--) {
+    return contour_list;
+}
 
+// Traverse contours inbound to the raster at a level by merging contour fragments
+void traverseInboundContours(const val_t level,
+        std::vector<std::list<ContourFragment *>> *output_contours) {
+
+    // Iterate over all blocks
+    for (int block_row = 0; block_row < nblocksv; block_row++) {
+        for (int block_col = 0; block_col < nblocksh; block_col++) {
+            // Skip non-perimeter blocks
+            if (block_row > 0 && block_row < nblocksv - 1 &&
+                    block_col > 0 && block_col < nblocksh - 1) {
+                continue;
+            }
+
+            // Iterate over all inboud contour fragments, except those from other levels
+            for (auto& kv_pair : blocks[block_row*nblocksh + block_col].inbound_fragments) {
+                if (kv_pair.second.level != level) {
+                    continue;
+                }
+                assert(kv_pair.second.visited == false);
+                output_contours->push_back(traverseContour(&(kv_pair.second),
+                        block_row, block_col));
+            }
+        }
     }
 }
 
-// Traverse closed contours at a level by merging contour fragments
-void traverseClosedContours(const val_t level, std::vector<std::list<Contour>> *output_contours) {
-    int block_num;
-    for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
-        Block *block = &blocks[block_num];
-        // Trivially convert all closed contour fragments in this block to full contours
-        // auto iter = block->closed_fragments.find()
-        // for (auto )
+// Traverse contours not inbound to the raster at a level by merging contour fragments
+void traverseInteriorContours(const val_t level,
+        std::vector<std::list<ContourFragment *>> *output_contours) {
+    // Iterate over all blocks
+    for (int block_row = 0; block_row < nblocksv; block_row++) {
+        for (int block_col = 0; block_col < nblocksh; block_col++) {
+
+            // Iterate over all inboud contour fragments, except those from other levels
+            for (auto& kv_pair : blocks[block_row*nblocksh + block_col].interior_fragments) {
+                if (kv_pair.second.level != level) {
+                    continue;
+                }
+                assert(kv_pair.second.visited == false);
+                output_contours->push_back(traverseContour(&(kv_pair.second),
+                        block_row, block_col));
+            }
+        }
     }
 }
 
@@ -455,11 +560,13 @@ inline Point transformPoint(Point point) {
     return point;
 }
 
-void printGeoJSON(FILE *output, const std::vector<std::list<Contour>> output_contours) {
+void printGeoJSON(FILE *output,
+        const std::vector<std::list<ContourFragment *>> output_contours) {
     fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
     size_t i;
     for (i = 0; i < output_contours.size(); i++) {
-        const Contour *contour = &(output_contours[i].front());
+        // TODO: Iterate over all contour fragments in the linked list
+        const ContourFragment *contour = output_contours[i].front();
         fprintf(output, "{ \"type\":\"Feature\", ");
         fprintf(output, "\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
                 contour->level, (contour->is_closed) ? "true" : "false");
@@ -627,15 +734,15 @@ int main(int argc, char **argv) {
     }
 
     // Phase 3
-    std::vector<std::list<Contour>> output_contours;
+    std::vector<std::list<ContourFragment *>> output_contours;
     size_t i;
     # pragma omp parallel default (shared) private(i)
     {
         # pragma omp for schedule(static) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
-            traverseNonClosedContours(level, &output_contours);
-            traverseClosedContours(level, &output_contours);
+            traverseInboundContours(level, &output_contours);
+            traverseInteriorContours(level, &output_contours);
         }
     }
 
