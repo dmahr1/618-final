@@ -164,6 +164,8 @@ int nblocksh, nblocksv;
 Block *blocks;
 auto prev_time = Time::now();
 
+void printContourFragments(Block *block);
+
 const char *get_option_string(const char *option_name, const char *default_value) {
     for (int i = _argc - 2; i >= 0; i -= 2) {
         if (strcmp(_argv[i], option_name) == 0) {
@@ -215,15 +217,20 @@ bool segmentIsInboundToBlock(const Block *const block, const int row,
 
 bool segmentIsInboundToRaster(const int row, const int col, const Side side) {
 
+    bool ret = false;
     switch (side) {
         case (Side::TOP):
-            return row == 0;            // Index of the first row of squares
+            ret = row == 0;            // Index of the first row of squares
+            break;
         case (Side::BOTTOM):
-            return row == nrows - 2;    // Index of the last row of squares
+            ret = row == nrows - 2;    // Index of the last row of squares
+            break;
         case (Side::LEFT):
-            return col == 0;            // Index of the first column of squares
+            ret = col == 0;            // Index of the first column of squares
+            break;
         case (Side::RIGHT):
-            return col == ncols - 2;    // Index of the last column of squares
+            ret = col == ncols - 2;    // Index of the last column of squares
+            break;
         case (Side::ANY):
             printf("Undefined behavior: checking whether segment is inbound "
                    "without specifying starting side (passed Side::ANY)\n");
@@ -233,6 +240,10 @@ bool segmentIsInboundToRaster(const int row, const int col, const Side side) {
                    "with invalid Side\n");
             exit(-1);
     }
+    if (ret) {
+        // printf("Found inbound segment at %d,%d on side %d\n", row, col, (int) side);
+    }
+    return ret;
 
 }
 
@@ -434,11 +445,12 @@ void traverseClosedContourFragments(Block *const block, const val_t level) {
 }
 
 // Retrieve ContourFragment in neighboring block
-ContourFragment * getNextContour(ContourFragment *current_contour,
-        const int block_row, const int block_col) {
+ContourFragment * getNextContour(const ContourFragment *const current_contour,
+        int *block_row, int *block_col) {
 
     // Lookup next block based on block and end_side of current contour
-    int next_block_row = block_row, next_block_col = block_col;
+    int next_block_row = *block_row;
+    int next_block_col = *block_col;
     switch(current_contour->end_side) {
         case Side::LEFT:
             next_block_col--;
@@ -463,8 +475,16 @@ ContourFragment * getNextContour(ContourFragment *current_contour,
 
     // Lookup next contour in next block
     Block *next_block = &blocks[next_block_row * nblocksh + next_block_col];
-    printf("Cur block = %d,%d, cur contour ends on %d, next block = %d,%d\n",
-            block_row, block_col, (int) current_contour->end_side, next_block_row, next_block_col);
+    printf("Cur block = %d,%d, cur contour at %.1f ends at side %d on %d, next block = %d,%d\n",
+            *block_row, *block_col, current_contour->level,
+            (int) current_contour->end_side, current_contour->end_side_idx,
+            next_block_row, next_block_col);
+    printContourFragments(&blocks[*block_row * nblocksh + *block_col]);
+    printContourFragments(next_block);
+
+    *block_row = next_block_row;
+    *block_col = next_block_col;
+
     return &(next_block->interior_fragments.at(
             {current_contour->level, current_contour->end_side_idx}));
 }
@@ -472,12 +492,12 @@ ContourFragment * getNextContour(ContourFragment *current_contour,
 // Traverse a contour at a level starting at a particular contour fragment
 //   and return it as a linked list of contour fragments
 std::list<ContourFragment *> traverseContour(ContourFragment* current_contour,
-        const int block_row, const int block_col) {
+        int block_row, int block_col) {
 
     std::list<ContourFragment *> contour_list;
     ContourFragment *next_contour;
     while (true) {
-        next_contour = getNextContour(current_contour, block_row, block_col);
+        next_contour = getNextContour(current_contour, &block_row, &block_col);
         current_contour->visited = true;
         contour_list.push_back(current_contour);
         if (next_contour == nullptr || next_contour->visited) {
@@ -654,6 +674,30 @@ void profileTime(std::string message) {
     prev_time = new_time;
 }
 
+void printContourFragments(Block *block) {
+
+    printf("Contents of block with UL corner at %d,%d:\n", block->first_row, block->first_col);
+    printf("  Inbound fragments (n = %zu)\n", block->inbound_fragments.size());
+    for (auto& kv_pair : block->inbound_fragments) {
+        ContourFragment *c = &(kv_pair.second);
+        printf("    Level %.1f, side idx %d to %d, end side %d: (%.1f,%.1f) -> (%.1f,%.1f)\n",
+                c->level, c->start_side_idx, c->end_side_idx, (int) c->end_side,
+                (*(c->line_string))[0].x, (*(c->line_string))[0].y,
+                (*(c->line_string))[c->line_string->size() - 1].x,
+                (*(c->line_string))[c->line_string->size() - 1].y);
+    }
+    printf("  Interior fragments (n = %zu)\n", block->interior_fragments.size());
+    for (auto& kv_pair : block->interior_fragments) {
+        ContourFragment *c = &(kv_pair.second);
+        printf("    Level %.1f, side idx %d to %d, end side %d: (%.1f,%.1f) -> (%.1f,%.1f)\n",
+                c->level, c->start_side_idx, c->end_side_idx, (int) c->end_side,
+                (*(c->line_string))[0].x, (*(c->line_string))[0].y,
+                (*(c->line_string))[c->line_string->size() - 1].x,
+                (*(c->line_string))[c->line_string->size() - 1].y);
+    }
+
+}
+
 int main(int argc, char **argv) {
 
     // Parse command line arguments
@@ -743,7 +787,9 @@ int main(int argc, char **argv) {
         # pragma omp for schedule(static) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
+            printf("PROCESSING INBOUND CONTOURS FOR LEVEL = %.1f\n", level);
             traverseInboundContours(level, &output_contours);
+            printf("PROCESSING INTERIOR CONTOURS FOR LEVEL = %.1f\n", level);
             traverseInteriorContours(level, &output_contours);
         }
     }
