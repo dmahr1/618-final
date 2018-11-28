@@ -83,9 +83,9 @@ int computeSideIndex(int square_row, int square_col, Side side) {
 }
 
 struct Segment {
-    Segment(const Side side_start, const Side side_end, 
+    Segment(const Side side_start, const Side side_end,
             const int side_start_idx, const int end_side_index, const val_t level,
-            const coord_t top, const coord_t left, const val_t ll, 
+            const coord_t top, const coord_t left, const val_t ll,
             const val_t lr, const val_t ur, const val_t ul) :
         side_start_idx(side_start_idx), end_side_index(end_side_index),
         visited(false) {
@@ -137,8 +137,8 @@ typedef struct {
     int num_cols;
     std::unordered_multimap<SegmentKey, Segment, pair_hash> interior_segments;
     std::unordered_multimap<SegmentKey, Segment, pair_hash> inbound_segments;
-    std::unordered_multimap<SegmentKey, Contour, pair_hash> interior_contours;
-    std::unordered_multimap<SegmentKey, Contour, pair_hash> inbound_contours;
+    std::unordered_multimap<val_t, Contour, pair_hash> closed_fragments;
+    std::unordered_multimap<val_t, Contour, pair_hash> nonclosed_fragments;
 } Block;
 
 // Globals from command line arguments
@@ -209,7 +209,7 @@ bool segmentIsInboundToBlock(const Block *const block, const int row,
     }
 }
 
-// Populate square with top-left pixel at (row, col).
+// Populate square whose top-left pixel is  at (row, col).
 void processSquare(Block *const block, const int row, const int col,
         const std::vector<val_t>& levels) {
     assert(row < nrows - 1 && col < ncols - 1);
@@ -221,6 +221,9 @@ void processSquare(Block *const block, const int row, const int col,
     val_t ul = input_array[row * ncols + col];
     val_t pixel_min = std::min(ll, std::min(lr, std::min(ur, ul)));
     val_t pixel_max = std::max(ll, std::max(lr, std::max(ur, ul)));
+
+    // Temporary buffer of segments for a single level at a single square
+    std::vector<std::pair<Side, Side>> start_end_sides;
 
     // Iterate over all levels, skipping those that are out of range for these pixels
     for (const auto& level : levels) {
@@ -240,8 +243,7 @@ void processSquare(Block *const block, const int row, const int col,
         coord_t top = (coord_t) row;
         coord_t left = (coord_t) col;
 
-
-        std::vector<std::pair<Side, Side>> start_end_sides;
+        start_end_sides.clear(); // Always empty sides from the previous square
 
         switch(key) {
             // Cases where 1 pixel is above the level
@@ -295,11 +297,11 @@ void processSquare(Block *const block, const int row, const int col,
                 break;
         }
 
-        // start_end_sides will always have either 1 or 2 elements.
+        // Iterate over the 1 or 2 segments in start_end_sides
         for (const auto& start_end_side : start_end_sides) {
-            // If a segment is inbound to the local block, then we add it to the
-            // block's inbound_segments map. Else, we add it to the block's
-            // interior_segments map.
+
+            // Determine which map this segment should be added to, either the
+            // block's inbound_segments map or the block's interior_segments map.
             std::unordered_multimap<SegmentKey, Segment, pair_hash> *destination;
             if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
                 destination = &(block->inbound_segments);
@@ -307,28 +309,31 @@ void processSquare(Block *const block, const int row, const int col,
                 destination = &(block->interior_segments);
             }
 
-            int start_side_index = computeSideIndex(row, col, 
-                    start_end_side.first);
-            int end_side_index = computeSideIndex(row, col, 
-                    start_end_side.second);
-            destination->insert({{level, start_side_index}, 
-                    Segment(start_end_side.first, start_end_side.second, 
-                        start_side_index, end_side_index, level, top, 
+            // Construct the segment and add it to the appropriate map
+            int start_side_index = computeSideIndex(row, col, start_end_side.first);
+            int end_side_index = computeSideIndex(row, col, start_end_side.second);
+            destination->insert({{level, start_side_index},
+                    Segment(start_end_side.first, start_end_side.second,
+                        start_side_index, end_side_index, level, top,
                         left, ll, lr, ur, ul)});
         }
    }
 }
 
+// Retrieve segment in a block at a level starting at particular side_idx
 Segment * getNextSegment(Block *const block, const val_t& level,
         const int next_start_side_index) {
+    assert(block->interior_segments.count({level, next_start_side_index}) <= 1);
     auto iter = block->interior_segments.find({level, next_start_side_index});
     return iter == block->interior_segments.end() ? nullptr : &(iter->second);
 }
 
-void traverseContourInBlock(const val_t& level,
-        const int contour_start_side_index, Block *const block, 
-        Segment *current_segment, std::unordered_multimap<SegmentKey, Contour, 
-        pair_hash> *dest) {
+// Traverse a contour in a block at a level starting at a particular side_idx
+//   until it closes on itself or exits the block, and then add contour
+//   fragment to the specified map.
+void traverseContourFragment(Block *const block, const val_t& level,
+        const int contour_start_side_index, Segment *current_segment,
+        std::unordered_multimap<val_t, Contour, pair_hash> *dest) {
     auto line_string = std::make_shared<std::vector<Point>>();
     int contour_end_side_index = -1;
     line_string->push_back(current_segment->start);
@@ -336,41 +341,42 @@ void traverseContourInBlock(const val_t& level,
 
     Segment *next_segment;
     while (true) {
-        next_segment = getNextSegment(block, level, 
-            current_segment->end_side_index);
+        next_segment = getNextSegment(block, level, current_segment->end_side_index);
+        current_segment->visited = true;
+        line_string->push_back(current_segment->end);
         if (next_segment == nullptr || next_segment->visited) {
             contour_end_side_index = current_segment->end_side_index;
             break;
         }
-        current_segment->visited = true;
         current_segment = next_segment;
-        line_string->push_back(current_segment->end);
     }
 
     // Kinda ugly code-wise, but constructing the Contour in place feels
     // like the right thing to do.
     // TODO: Consider whether it can/should be cleaner.
-    dest->emplace(std::make_pair<SegmentKey, Contour>(
-                {level, contour_start_side_index},
-                {line_string, level, contour_start_side_index, 
-                contour_end_side_index}));
+    assert(contour_end_side_index != -1);
+    dest->emplace(std::make_pair<const val_t&, Contour>(
+                level,
+                {line_string, level, contour_start_side_index, contour_end_side_index}));
 }
 
-void traverseNonClosedContours(Block *const block, const val_t level) {
+// Traverse all contour fragments in a block at a level that are non-closed
+void traverseNonClosedContourFragments(Block *const block, const val_t level) {
     Segment *current_segment;
 
-    // Iterate over all inbound segments, i.e. segments that start on the edge 
+    // Iterate over all inbound segments, i.e. segments that start on the edge
     // of this block.
     for (auto& kv_pair : block->inbound_segments) {
         val_t level = kv_pair.first.first;
         int contour_start_side_index = kv_pair.first.second;
         current_segment = &(kv_pair.second);
-        traverseContourInBlock(level, contour_start_side_index, block, 
-                current_segment, &(block->inbound_contours));
+        traverseContourFragment(block, level, contour_start_side_index,
+                current_segment, &(block->nonclosed_fragments));
     }
 }
 
-void traverseClosedContours(Block *const block, const val_t level) {
+// Traverse all contour fragments in a block at a level that are closed
+void traverseClosedContourFragments(Block *const block, const val_t level) {
     Segment *current_segment;
 
     // Iterate over all segments, and do a traversal from any that remain
@@ -384,17 +390,41 @@ void traverseClosedContours(Block *const block, const val_t level) {
 
         val_t level = kv_pair.first.first;
         int contour_start_side_index = kv_pair.first.second;
-        traverseContourInBlock(level, contour_start_side_index, block, 
-                current_segment, &(block->interior_contours));
+        traverseContourFragment(block, level, contour_start_side_index,
+                current_segment, &(block->closed_fragments));
     }
 }
 
-void traverseNonClosedContourFragments(const val_t level, std::vector<std::list<Contour>> *output_contours) {
-    return;
+// Traverse non-closed contours at a level by merging contour fragments
+void traverseNonClosedContours(const val_t level, std::vector<std::list<Contour>> *output_contours) {
+    int block_col = 0, block_row = 0;
+    // Iterate over blocks in top row, exclusive of upper-right corner
+    for (; block_col < nblocksh - 1; block_col++) {
+
+    }
+    // Iterate over blocks in right column, exclusive of lower-right corner
+    for (; block_row < nblocksv - 1; block_row++) {
+
+    }
+    // Iterate over blocks in bottom row, exclusive of lower-left corner
+    for (; block_col > 0; block_col--) {
+
+    }
+    // Iterate over blocks in left column, exclusive of upper-left corner
+    for (; block_row > 0; block_row--) {
+
+    }
 }
 
-void traverseClosedContourFragments(const val_t level, std::vector<std::list<Contour>> *output_contours) {
-    return;
+// Traverse closed contours at a level by merging contour fragments
+void traverseClosedContours(const val_t level, std::vector<std::list<Contour>> *output_contours) {
+    int block_num;
+    for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
+        Block *block = &blocks[block_num];
+        // Trivially convert all closed contour fragments in this block to full contours
+        // auto iter = block->closed_fragments.find()
+        // for (auto )
+    }
 }
 
 // TODO: Fix after everything else has been restructured.
@@ -589,8 +619,8 @@ int main(int argc, char **argv) {
             // Phase 2
             for (size_t i = 0; i < levels.size(); i++) {
                 const auto& level = levels[i];
-                traverseNonClosedContours(block, level);
-                traverseClosedContours(block, level);
+                traverseNonClosedContourFragments(block, level);
+                traverseClosedContourFragments(block, level);
             }
 
         }
@@ -604,8 +634,8 @@ int main(int argc, char **argv) {
         # pragma omp for schedule(static) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
-            traverseNonClosedContourFragments(level, &output_contours);
-            traverseClosedContourFragments(level, &output_contours);
+            traverseNonClosedContours(level, &output_contours);
+            traverseClosedContours(level, &output_contours);
         }
     }
 
