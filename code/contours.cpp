@@ -463,6 +463,8 @@ ContourFragment * getNextContour(ContourFragment *current_contour,
 
     // Lookup next contour in next block
     Block *next_block = &blocks[next_block_row * nblocksh + next_block_col];
+    printf("Cur block = %d,%d, cur contour ends on %d, next block = %d,%d\n",
+            block_row, block_col, (int) current_contour->end_side, next_block_row, next_block_col);
     return &(next_block->interior_fragments.at(
             {current_contour->level, current_contour->end_side_idx}));
 }
@@ -563,18 +565,18 @@ inline Point transformPoint(Point point) {
 void printGeoJSON(FILE *output,
         const std::vector<std::list<ContourFragment *>> output_contours) {
     fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
-    size_t i;
+    size_t i, j;
+    ContourFragment *contour;
     for (i = 0; i < output_contours.size(); i++) {
-        // TODO: Iterate over all contour fragments in the linked list
-        const ContourFragment *contour = output_contours[i].front();
+        contour = output_contours[i].front();
         fprintf(output, "{ \"type\":\"Feature\", ");
-        fprintf(output, "\"properties\": {\"level\":%.2f, \"is_closed\":%s}, ",
-                contour->level, (contour->is_closed) ? "true" : "false");
+        fprintf(output, "\"properties\": {\"level\":%.2f}, ", contour->level);
         fprintf(output, "\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
-        size_t j;
-        for (j = 0; j < contour->line_string->size() - 1; j++) {
-            Point pt = transformPoint((*(contour->line_string))[j]);
-            fprintf(output, "[%.8lf,%.8lf],", pt.x, pt.y);
+        for (ContourFragment *contour : output_contours[i]) {
+            for (j = 0; j < contour->line_string->size() - 1; j++) {
+                Point pt = transformPoint((*(contour->line_string))[j]);
+                fprintf(output, "[%.8lf,%.8lf],", pt.x, pt.y);
+            }
         }
         Point pt = transformPoint((*(contour->line_string))[j]);
         fprintf(output, "[%.8lf,%.8lf] ] } }", pt.x, pt.y);
