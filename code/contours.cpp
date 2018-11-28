@@ -107,9 +107,10 @@ typedef struct Segment Segment;
 
 struct Contour {
     Contour(const std::shared_ptr<std::vector<Point>>& line_string,
-            const val_t& level, int start_side_idx, int end_side_idx, Side end_side) :
+            const val_t& level, int start_side_idx, int end_side_idx,
+            Side end_side, bool is_closed) :
         line_string(line_string), level(level), start_side_idx(start_side_idx),
-        end_side_idx(end_side_idx), end_side(end_side), visited(false), is_closed(false) {}
+        end_side_idx(end_side_idx), end_side(end_side), visited(false), is_closed(is_closed) {}
 
     std::shared_ptr<std::vector<Point>> line_string;
     val_t level;
@@ -203,7 +204,7 @@ bool segmentIsInboundToBlock(const Block *const block, const int row,
         case (Side::LEFT):
             return col == block->first_col;
         case (Side::RIGHT):
-            return col == block->first_col + block->num_rows - 1;
+            return col == block->first_col + block->num_cols - 1;
         case (Side::ANY):
             printf("Undefined behavior: checking whether segment is inbound "
                    "without specifying starting side (passed Side::ANY)\n");
@@ -342,6 +343,8 @@ void processSquare(Block *const block, const int row, const int col,
             // block's inbound_segments map or the block's interior_segments map.
             std::unordered_map<SegmentKey, Segment, pair_hash> *destination;
             if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
+                printf("  Level %.1f @ square (%d, %d) is inbound\n",
+                        level, row, col);
                 destination = &(block->inbound_segments);
             } else {
                 destination = &(block->interior_segments);
@@ -385,13 +388,23 @@ void traverseContourFragment(Block *const block, const val_t& level,
     line_string->push_back(current_segment->start);
 
     Segment *next_segment;
+    bool is_closed = false;
     while (true) {
+        printf("  Level %.1f @ square (%d, %d), start (%.1f, %.1f), end (%.1f, %.1f)\n",
+                level, current_segment->square_row, current_segment->square_col,
+                current_segment->start.x, current_segment->start.y,
+                current_segment->end.x, current_segment->end.y);
         int end_side_index = computeSideIndex(current_segment->square_row,
                 current_segment->square_col, current_segment->end_side);
         next_segment = getNextSegment(block, level, end_side_index);
         current_segment->visited = true;
         line_string->push_back(current_segment->end);
-        if (next_segment == nullptr || next_segment->visited) {
+        if (next_segment == nullptr) {
+            contour_end_side_index = end_side_index;
+            contour_end_side = current_segment->end_side;
+            break;
+        } else if (next_segment->visited) {
+            is_closed = true;
             contour_end_side_index = end_side_index;
             contour_end_side = current_segment->end_side;
             break;
@@ -406,7 +419,7 @@ void traverseContourFragment(Block *const block, const val_t& level,
     dest->emplace(std::make_pair<SegmentKey, ContourFragment>(
                 {level, contour_start_side_index},
                 {line_string, level, contour_start_side_index,
-                 contour_end_side_index, contour_end_side}));
+                 contour_end_side_index, contour_end_side, is_closed}));
 }
 
 // Traverse all contour fragments in a block at a level that are non-closed
@@ -543,12 +556,15 @@ void traverseInteriorContours(const val_t level,
 
             // Iterate over all inboud contour fragments, except those from other levels
             for (auto& kv_pair : blocks[block_row*nblocksh + block_col].interior_fragments) {
-                if (kv_pair.second.level != level) {
+                if (kv_pair.second.level != level || kv_pair.second.visited) {
                     continue;
                 }
-                assert(kv_pair.second.visited == false);
-                output_contours->push_back(traverseContour(&(kv_pair.second),
-                        block_row, block_col));
+                if (kv_pair.second.is_closed) {
+                    output_contours->push_back(std::list<ContourFragment *>({&(kv_pair.second)}));
+                } else {
+                    output_contours->push_back(traverseContour(&(kv_pair.second),
+                            block_row, block_col));
+                }
             }
         }
     }
@@ -577,29 +593,32 @@ void countSegments(int *total_segments = nullptr, int *unvisited_segments = null
 }
 
 inline Point transformPoint(Point point) {
-    point.x =  point.x * pixel_size + raster_ll.x;
-    point.y = (-point.y + nrows) * pixel_size + raster_ll.y;
+    // point.x =  point.x * pixel_size + raster_ll.x;
+    // point.y = (-point.y + nrows) * pixel_size + raster_ll.y;
     return point;
 }
 
 void printGeoJSON(FILE *output,
         const std::vector<std::list<ContourFragment *>> output_contours) {
     fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
-    size_t i, j;
     ContourFragment *contour;
-    for (i = 0; i < output_contours.size(); i++) {
+    for (size_t i = 0; i < output_contours.size(); i++) {
         contour = output_contours[i].front();
         fprintf(output, "{ \"type\":\"Feature\", ");
         fprintf(output, "\"properties\": {\"level\":%.2f}, ", contour->level);
         fprintf(output, "\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
+        size_t num_fragments = output_contours[i].size();
+        size_t fragment_num = 0;
         for (ContourFragment *contour : output_contours[i]) {
-            for (j = 0; j < contour->line_string->size() - 1; j++) {
+            for (size_t j = 0; j < contour->line_string->size(); j++) {
                 Point pt = transformPoint((*(contour->line_string))[j]);
-                fprintf(output, "[%.8lf,%.8lf],", pt.x, pt.y);
+                bool is_last_point = j == contour->line_string->size() - 1 &&
+                        fragment_num == num_fragments - 1;
+                fprintf(output, "[%.8lf,%.8lf]%s", pt.x, pt.y, is_last_point ? "" : ",");
             }
+            fragment_num++;
         }
-        Point pt = transformPoint((*(contour->line_string))[j]);
-        fprintf(output, "[%.8lf,%.8lf] ] } }", pt.x, pt.y);
+        fprintf(output, "] } }");
         fprintf(output, "%s\n", (i < output_contours.size() - 1) ? "," : "");
     }
     fprintf(output, "] } \n");
@@ -674,14 +693,31 @@ void profileTime(std::string message) {
     prev_time = new_time;
 }
 
+std::string sideToString(Side side) {
+    switch(side) {
+        case Side::TOP:
+            return "TOP";
+        case Side::BOTTOM:
+            return "BOTTOM";
+        case Side::LEFT:
+            return "LEFT";
+        case Side::RIGHT:
+            return "RIGHT";
+        case Side::ANY:
+            return "ANY";
+        default:
+            return "OTHER";
+    }
+}
+
 void printContourFragments(Block *block) {
 
     printf("Contents of block with UL corner at %d,%d:\n", block->first_row, block->first_col);
     printf("  Inbound fragments (n = %zu)\n", block->inbound_fragments.size());
     for (auto& kv_pair : block->inbound_fragments) {
         ContourFragment *c = &(kv_pair.second);
-        printf("    Level %.1f, side idx %d to %d, end side %d: (%.1f,%.1f) -> (%.1f,%.1f)\n",
-                c->level, c->start_side_idx, c->end_side_idx, (int) c->end_side,
+        printf("    Level %5.1f, %zu vertices, side idx %3d to %3d, end side %6s: (%4.1f, %4.1f) -> (%4.1f, %4.1f)\n",
+                c->level, c->line_string->size(), c->start_side_idx, c->end_side_idx, sideToString(c->end_side).c_str(),
                 (*(c->line_string))[0].x, (*(c->line_string))[0].y,
                 (*(c->line_string))[c->line_string->size() - 1].x,
                 (*(c->line_string))[c->line_string->size() - 1].y);
@@ -689,8 +725,8 @@ void printContourFragments(Block *block) {
     printf("  Interior fragments (n = %zu)\n", block->interior_fragments.size());
     for (auto& kv_pair : block->interior_fragments) {
         ContourFragment *c = &(kv_pair.second);
-        printf("    Level %.1f, side idx %d to %d, end side %d: (%.1f,%.1f) -> (%.1f,%.1f)\n",
-                c->level, c->start_side_idx, c->end_side_idx, (int) c->end_side,
+        printf("    Level %5.1f, %zu vertices, side idx %3d to %3d, end side %6s: (%4.1f, %4.1f) -> (%4.1f, %4.1f)\n",
+                c->level, c->line_string->size(), c->start_side_idx, c->end_side_idx, sideToString(c->end_side).c_str(),
                 (*(c->line_string))[0].x, (*(c->line_string))[0].y,
                 (*(c->line_string))[c->line_string->size() - 1].x,
                 (*(c->line_string))[c->line_string->size() - 1].y);
@@ -775,6 +811,8 @@ int main(int argc, char **argv) {
                 traverseNonClosedContourFragments(block, level);
                 traverseClosedContourFragments(block, level);
             }
+
+            printContourFragments(block);
 
         }
     }
