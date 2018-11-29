@@ -1,152 +1,13 @@
-#include <algorithm>
-#include <chrono>
-#include <cstring>
-#include <functional>
-#include <iostream>
-#include <limits>
-#include <list>
-#include <memory>
-#include <random>
-#include <unordered_map>
-#include <vector>
-
-#include <assert.h>
-#include <omp.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include "contours.h"
 
 using Time = std::chrono::high_resolution_clock;
 
-// Constants and enumerations
-enum class Side {TOP, BOTTOM, LEFT, RIGHT, ANY};
-constexpr uint8_t UL_ABOVE = 8;
-constexpr uint8_t UR_ABOVE = 4;
-constexpr uint8_t LR_ABOVE = 2;
-constexpr uint8_t LL_ABOVE = 1;
 
-// Structs and typedefs
-typedef double val_t;
-typedef double coord_t;
+//======================================================
+//  GLOBALS
+//======================================================
 
-typedef struct {
-    coord_t x;
-    coord_t y;
-} Point;
-
-inline val_t interpolate(const val_t left_or_top, const val_t right_or_bottom, const val_t level) {
-    // Return the coordinate at level linearly proportional between top/left and bottom/right
-    // TODO(maybe): do we need to be careful about tolerance?
-    val_t ret = (level - left_or_top) / (right_or_bottom - left_or_top);
-    assert(ret >= 0);
-    return ret;
-};
-
-inline Point interpolatePoint(const Side side, const val_t level, const coord_t top,
-        const coord_t left, const val_t ll, const val_t lr, const val_t ur, const val_t ul) {
-    switch(side) {
-        case Side::LEFT:
-            return {left,  top + interpolate(ul, ll, level)};
-        case Side::RIGHT:
-            return {left + 1.0, top + interpolate(ur, lr, level)};
-        case Side::TOP:
-            return {left + interpolate(ul, ur, level), top};
-        case Side::BOTTOM:
-            return {left + interpolate(ll, lr, level), top + 1.0};
-        default:
-            assert(false);
-    }
-    assert(false);
-}
-
-// Declaring these two global variables here, as they are used by
-// computeSideIndex.
-int nrows, ncols;
-
-int computeSideIndex(int square_row, int square_col, Side side) {
-    // Assume horizontal sides are numbered first, then vertical.
-    switch(side) {
-        case (Side::TOP):
-            return square_row * (ncols - 1) + square_col;
-        case (Side::BOTTOM):
-            return (square_row + 1) * (ncols - 1) + square_col;
-        case (Side::LEFT):
-            return nrows * (ncols - 1) + square_row * ncols + square_col;
-        case (Side::RIGHT):
-            return nrows * (ncols - 1) + square_row * ncols + square_col + 1;
-        case (Side::ANY):
-            printf("side argument to computeSideIndex cannot be Side::ANY\n");
-            exit(-1);
-        default:
-            printf("invalid Side enum\n");
-            exit(-1);
-    }
-}
-
-struct Segment {
-    Segment(const Side start_side, const Side end_side,
-            const int square_row, const int square_col,
-            const val_t level, const bool is_inbound_to_raster,
-            const coord_t top, const coord_t left, const val_t ll,
-            const val_t lr, const val_t ur, const val_t ul) :
-        square_row(square_row), square_col(square_col), end_side(end_side),
-        visited(false), is_inbound_to_raster(is_inbound_to_raster) {
-        start = interpolatePoint(start_side, level, top, left, ll, lr, ur, ul);
-        end = interpolatePoint(end_side, level, top, left, ll, lr, ur, ul);
-    }
-
-    int square_row;
-    int square_col;
-    Side end_side;
-    bool visited;
-    bool is_inbound_to_raster;
-    Point start;
-    Point end;
-};
-
-typedef struct Segment Segment;
-
-struct Contour {
-    Contour(const std::shared_ptr<std::vector<Point>>& line_string,
-            const val_t& level, int start_side_idx, int end_side_idx,
-            Side end_side, bool is_closed) :
-        line_string(line_string), level(level), start_side_idx(start_side_idx),
-        end_side_idx(end_side_idx), end_side(end_side), visited(false), is_closed(is_closed) {}
-
-    std::shared_ptr<std::vector<Point>> line_string;
-    val_t level;
-    int start_side_idx;
-    int end_side_idx;
-    Side end_side;
-    bool visited;
-    // TODO: Consider whether this is still necessary?
-    bool is_closed;
-};
-
-typedef struct Contour ContourFragment;
-
-struct pair_hash {
-    // Using pair hash from https://stackoverflow.com/a/32685618/1254992.
-    std::size_t operator () (const std::pair<val_t, int> &p) const {
-        auto h1 = std::hash<val_t>{}(p.first);
-        auto h2 = std::hash<int>{}(p.second);
-        return h1 ^ h2;
-    }
-};
-
-typedef std::pair<val_t, int> SegmentKey;
-
-typedef struct {
-    int first_row;
-    int first_col;
-    int num_rows;
-    int num_cols;
-    std::unordered_map<SegmentKey, Segment, pair_hash> interior_segments;
-    std::unordered_map<SegmentKey, Segment, pair_hash> inbound_segments;
-    std::unordered_map<SegmentKey, ContourFragment, pair_hash> inbound_fragments;
-    std::unordered_map<SegmentKey, ContourFragment, pair_hash> interior_fragments;
-} Block;
-
-// Globals from command line arguments
+// Globals set by command line arguments
 static int _argc;
 static char **_argv;
 const char *input_filename;
@@ -155,6 +16,7 @@ int num_threads = 1;
 int block_dim = 32;
 
 // Globals from input file's header
+int nrows, ncols;
 Point raster_ll;
 coord_t pixel_size;
 
@@ -164,8 +26,35 @@ val_t *input_array;
 int nblocksh, nblocksv;
 Block *blocks;
 auto prev_time = Time::now();
+bool DEBUG = false;
 
-void printContourFragments(Block *block);
+
+//======================================================
+//  CONSTRUCTORS
+//======================================================
+
+Segment::Segment(const Side start_side, const Side end_side,
+        const int square_row, const int square_col,
+        const val_t level, const bool is_inbound_to_raster,
+        const coord_t top, const coord_t left, const val_t ll,
+        const val_t lr, const val_t ur, const val_t ul) :
+        square_row(square_row), square_col(square_col), end_side(end_side),
+        visited(false), is_inbound_to_raster(is_inbound_to_raster) {
+    start = interpolatePoint(start_side, level, top, left, ll, lr, ur, ul);
+    end = interpolatePoint(end_side, level, top, left, ll, lr, ur, ul);
+}
+
+Contour::Contour(const std::shared_ptr<std::vector<Point>>& line_string,
+        const val_t& level, int start_side_idx, int end_side_idx,
+        Side end_side, bool is_closed) :
+        line_string(line_string), level(level), start_side_idx(start_side_idx),
+        end_side_idx(end_side_idx), end_side(end_side), visited(false), is_closed(is_closed) {
+}
+
+
+//======================================================
+//  INPUT HANDLING
+//======================================================
 
 const char *get_option_string(const char *option_name, const char *default_value) {
     for (int i = _argc - 2; i >= 0; i -= 2) {
@@ -194,59 +83,68 @@ float get_option_float(const char *option_name, float default_value) {
     return default_value;
 }
 
-bool segmentIsInboundToBlock(const Block *const block, const int row,
-        const int col, const Side side) {
-    switch (side) {
-        case (Side::TOP):
-            return row == block->first_row;
-        case (Side::BOTTOM):
-            return row == block->first_row + block->num_rows - 1;
-        case (Side::LEFT):
-            return col == block->first_col;
-        case (Side::RIGHT):
-            return col == block->first_col + block->num_cols - 1;
-        case (Side::ANY):
-            printf("Undefined behavior: checking whether segment is inbound "
-                   "without specifying starting side (passed Side::ANY)\n");
-            exit(-1);
-        default:
-            printf("Undefined behavior: checking whether segment is inbound "
-                   "with invalid Side\n");
-            exit(-1);
-    }
-}
+void readArguments(int argc, char **argv) {
 
-bool segmentIsInboundToRaster(const int row, const int col, const Side side) {
+    // This directly copies the flag parsing pattern used by assignment 3.
+    _argc = argc - 1;
+    _argv = argv + 1;
 
-    bool ret = false;
-    switch (side) {
-        case (Side::TOP):
-            ret = row == 0;            // Index of the first row of squares
-            break;
-        case (Side::BOTTOM):
-            ret = row == nrows - 2;    // Index of the last row of squares
-            break;
-        case (Side::LEFT):
-            ret = col == 0;            // Index of the first column of squares
-            break;
-        case (Side::RIGHT):
-            ret = col == ncols - 2;    // Index of the last column of squares
-            break;
-        case (Side::ANY):
-            printf("Undefined behavior: checking whether segment is inbound "
-                   "without specifying starting side (passed Side::ANY)\n");
-            exit(-1);
-        default:
-            printf("Undefined behavior: checking whether segment is inbound "
-                   "with invalid Side\n");
-            exit(-1);
+    // Open input file
+    input_filename = get_option_string("-f", nullptr);
+    if (!(input_file = fopen(input_filename, "r"))) {
+        printf("Unable to open file: %s.\n", input_filename);
+        exit(-1);
     }
-    if (ret) {
-        // printf("Found inbound segment at %d,%d on side %d\n", row, col, (int) side);
-    }
-    return ret;
+
+    // Read interval size
+    interval = get_option_float("-i", interval);
+
+    // Read number of threads and set the omp variable accordingly
+    num_threads = get_option_int("-n", num_threads);
+    omp_set_num_threads(num_threads);
+
+    // Read block dimension
+    block_dim = get_option_int("-b", block_dim);
 
 }
+
+// Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
+// Arbitary input raster files can be converted to this format with this GDAL command:
+//    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
+void readHeader(FILE *input) {
+    char str[100];
+    int ret;
+    ret = std::fscanf(input, "%s %d", str, &ncols);
+    assert(ret > 0 && std::strcmp(str, "ncols") == 0);
+    ret = std::fscanf(input, "%s %d", str, &nrows);
+    assert(ret > 0 && std::strcmp(str, "nrows") == 0);
+    ret = std::fscanf(input, "%s %lf", str, &raster_ll.x);
+    assert(ret > 0 && std::strcmp(str, "xllcorner") == 0);
+    ret = std::fscanf(input, "%s %lf", str, &raster_ll.y);
+    assert(ret > 0 && std::strcmp(str, "yllcorner") == 0);
+    ret = std::fscanf(input, "%s %lf", str, &pixel_size);
+    assert(ret > 0 && std::strcmp(str, "cellsize") == 0);
+}
+
+std::vector<val_t> determineLevels(val_t interval, val_t val_min, val_t val_max) {
+    // By default, generate contours for 10 levels, equally spaced between val_min and val_max.
+    if (interval < 0) {
+        interval = (val_max - val_min) / 10.0;
+    }
+    // Populate levels every <interval> starting just below val_min to just above val_max
+    std::vector<val_t> levels;
+    val_t val;
+    for (val = val_min - fmod(val_min, interval); val < val_max; val += interval) {
+        levels.push_back(val);
+    }
+    levels.push_back(val);
+    return levels;
+}
+
+
+//======================================================
+//  PHASE 1: MARCHING SQUARES PROCESSING
+//======================================================
 
 // Populate square whose top-left pixel is  at (row, col).
 void processSquare(Block *const block, const int row, const int col,
@@ -343,8 +241,6 @@ void processSquare(Block *const block, const int row, const int col,
             // block's inbound_segments map or the block's interior_segments map.
             std::unordered_map<SegmentKey, Segment, pair_hash> *destination;
             if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
-                printf("  Level %.1f @ square (%d, %d) is inbound\n",
-                        level, row, col);
                 destination = &(block->inbound_segments);
             } else {
                 destination = &(block->interior_segments);
@@ -361,66 +257,99 @@ void processSquare(Block *const block, const int row, const int col,
    }
 }
 
-// Retrieve segment in a block at a level starting at particular side_idx
-Segment * getNextSegment(Block *const block, const val_t& level,
-        const int next_start_side_index) {
-    auto iter = block->interior_segments.find({level, next_start_side_index});
-    return iter == block->interior_segments.end() ? nullptr : &(iter->second);
+inline val_t interpolate(const val_t left_or_top, const val_t right_or_bottom, const val_t level) {
+    // Return the coordinate at level linearly proportional between top/left and bottom/right
+    // TODO(maybe): do we need to be careful about tolerance?
+    val_t ret = (level - left_or_top) / (right_or_bottom - left_or_top);
+    assert(ret >= 0);
+    return ret;
+};
+
+inline Point interpolatePoint(const Side side, const val_t level, const coord_t top,
+        const coord_t left, const val_t ll, const val_t lr, const val_t ur, const val_t ul) {
+    switch(side) {
+        case Side::LEFT:
+            return {left,  top + interpolate(ul, ll, level)};
+        case Side::RIGHT:
+            return {left + 1.0, top + interpolate(ur, lr, level)};
+        case Side::TOP:
+            return {left + interpolate(ul, ur, level), top};
+        case Side::BOTTOM:
+            return {left + interpolate(ll, lr, level), top + 1.0};
+        default:
+            assert(false);
+    }
+    assert(false);
 }
 
-// Traverse a contour in a block at a level starting at a particular side_idx
-//   until it closes on itself or exits the block, and then add contour
-//   fragment to the specified map.
-void traverseContourFragment(Block *const block, const val_t& level,
-        const int contour_start_side_index, Segment *current_segment) {
-
-    // Determine which map output contour fragment should be added to
-    std::unordered_map<SegmentKey, ContourFragment, pair_hash> *dest;
-    if (current_segment->is_inbound_to_raster) {
-        dest = &(block->inbound_fragments);
-    } else {
-        dest = &(block->interior_fragments);
+inline bool segmentIsInboundToBlock(const Block *const block, const int row,
+        const int col, const Side side) {
+    switch (side) {
+        case (Side::TOP):
+            return row == block->first_row;
+        case (Side::BOTTOM):
+            return row == block->first_row + block->num_rows - 1;
+        case (Side::LEFT):
+            return col == block->first_col;
+        case (Side::RIGHT):
+            return col == block->first_col + block->num_cols - 1;
+        case (Side::ANY):
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "without specifying starting side (passed Side::ANY)\n");
+            exit(-1);
+        default:
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "with invalid Side\n");
+            exit(-1);
     }
-
-    auto line_string = std::make_shared<std::vector<Point>>();
-    int contour_end_side_index = -1;
-    Side contour_end_side = Side::ANY;
-    line_string->push_back(current_segment->start);
-
-    Segment *next_segment;
-    bool is_closed = false;
-    while (true) {
-        printf("  Level %.1f @ square (%d, %d), start (%.1f, %.1f), end (%.1f, %.1f)\n",
-                level, current_segment->square_row, current_segment->square_col,
-                current_segment->start.x, current_segment->start.y,
-                current_segment->end.x, current_segment->end.y);
-        int end_side_index = computeSideIndex(current_segment->square_row,
-                current_segment->square_col, current_segment->end_side);
-        next_segment = getNextSegment(block, level, end_side_index);
-        current_segment->visited = true;
-        line_string->push_back(current_segment->end);
-        if (next_segment == nullptr) {
-            contour_end_side_index = end_side_index;
-            contour_end_side = current_segment->end_side;
-            break;
-        } else if (next_segment->visited) {
-            is_closed = true;
-            contour_end_side_index = end_side_index;
-            contour_end_side = current_segment->end_side;
-            break;
-        }
-        current_segment = next_segment;
-    }
-
-    // Kinda ugly code-wise, but constructing the ContourFragment in place feels
-    // like the right thing to do.
-    // TODO: Consider whether it can/should be cleaner.
-    assert(contour_end_side_index != -1);
-    dest->emplace(std::make_pair<SegmentKey, ContourFragment>(
-                {level, contour_start_side_index},
-                {line_string, level, contour_start_side_index,
-                 contour_end_side_index, contour_end_side, is_closed}));
 }
+
+inline bool segmentIsInboundToRaster(const int row, const int col, const Side side) {
+
+    switch (side) {
+        case (Side::TOP):
+            return row == 0;            // Index of the first row of squares
+        case (Side::BOTTOM):
+            return row == nrows - 2;    // Index of the last row of squares
+        case (Side::LEFT):
+            return col == 0;            // Index of the first column of squares
+        case (Side::RIGHT):
+            return col == ncols - 2;    // Index of the last column of squares
+        case (Side::ANY):
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "without specifying starting side (passed Side::ANY)\n");
+            exit(-1);
+        default:
+            printf("Undefined behavior: checking whether segment is inbound "
+                   "with invalid Side\n");
+            exit(-1);
+    }
+}
+
+inline int computeSideIndex(int square_row, int square_col, Side side) {
+    // Assume horizontal sides are numbered first, then vertical.
+    switch(side) {
+        case (Side::TOP):
+            return square_row * (ncols - 1) + square_col;
+        case (Side::BOTTOM):
+            return (square_row + 1) * (ncols - 1) + square_col;
+        case (Side::LEFT):
+            return nrows * (ncols - 1) + square_row * ncols + square_col;
+        case (Side::RIGHT):
+            return nrows * (ncols - 1) + square_row * ncols + square_col + 1;
+        case (Side::ANY):
+            printf("side argument to computeSideIndex cannot be Side::ANY\n");
+            exit(-1);
+        default:
+            printf("invalid Side enum\n");
+            exit(-1);
+    }
+}
+
+
+//======================================================
+//  PHASE 2: JOINING SEGMENTS INTO CONTOUR FRAGMENTS
+//======================================================
 
 // Traverse all contour fragments in a block at a level that are non-closed
 void traverseNonClosedContourFragments(Block *const block, const val_t level) {
@@ -457,69 +386,68 @@ void traverseClosedContourFragments(Block *const block, const val_t level) {
     }
 }
 
-// Retrieve ContourFragment in neighboring block
-ContourFragment * getNextContour(const ContourFragment *const current_contour,
-        int *block_row, int *block_col) {
+// Traverse a contour in a block at a level starting at a particular side_idx
+//   until it closes on itself or exits the block, and then add contour
+//   fragment to the specified map.
+void traverseContourFragment(Block *const block, const val_t& level,
+        const int contour_start_side_index, Segment *current_segment) {
 
-    // Lookup next block based on block and end_side of current contour
-    int next_block_row = *block_row;
-    int next_block_col = *block_col;
-    switch(current_contour->end_side) {
-        case Side::LEFT:
-            next_block_col--;
-            break;
-        case Side::RIGHT:
-            next_block_col++;
-            break;
-        case Side::TOP:
-            next_block_row--;
-            break;
-        case Side::BOTTOM:
-            next_block_row++;
-            break;
-        default:
-            assert(false);
-    }
-    // Next block is out of bounds
-    if (next_block_row < 0 || next_block_row > nblocksv - 1 ||
-            next_block_col < 0 || next_block_col > nblocksh - 1) {
-        return nullptr;
+    // Determine which map output contour fragment should be added to
+    std::unordered_map<SegmentKey, ContourFragment, pair_hash> *dest;
+    if (current_segment->is_inbound_to_raster) {
+        dest = &(block->inbound_fragments);
+    } else {
+        dest = &(block->interior_fragments);
     }
 
-    // Lookup next contour in next block
-    Block *next_block = &blocks[next_block_row * nblocksh + next_block_col];
-    printf("Cur block = %d,%d, cur contour at %.1f ends at side %d on %d, next block = %d,%d\n",
-            *block_row, *block_col, current_contour->level,
-            (int) current_contour->end_side, current_contour->end_side_idx,
-            next_block_row, next_block_col);
-    printContourFragments(&blocks[*block_row * nblocksh + *block_col]);
-    printContourFragments(next_block);
+    auto line_string = std::make_shared<std::vector<Point>>();
+    int contour_end_side_index = -1;
+    Side contour_end_side = Side::ANY;
+    line_string->push_back(current_segment->start);
 
-    *block_row = next_block_row;
-    *block_col = next_block_col;
-
-    return &(next_block->interior_fragments.at(
-            {current_contour->level, current_contour->end_side_idx}));
-}
-
-// Traverse a contour at a level starting at a particular contour fragment
-//   and return it as a linked list of contour fragments
-std::list<ContourFragment *> traverseContour(ContourFragment* current_contour,
-        int block_row, int block_col) {
-
-    std::list<ContourFragment *> contour_list;
-    ContourFragment *next_contour;
+    Segment *next_segment;
+    bool is_closed = false;
     while (true) {
-        next_contour = getNextContour(current_contour, &block_row, &block_col);
-        current_contour->visited = true;
-        contour_list.push_back(current_contour);
-        if (next_contour == nullptr || next_contour->visited) {
+        if (DEBUG) printSegment(level, current_segment);
+        int end_side_index = computeSideIndex(current_segment->square_row,
+                current_segment->square_col, current_segment->end_side);
+        next_segment = getNextSegment(block, level, end_side_index);
+        current_segment->visited = true;
+        line_string->push_back(current_segment->end);
+        if (next_segment == nullptr) {
+            contour_end_side_index = end_side_index;
+            contour_end_side = current_segment->end_side;
+            break;
+        } else if (next_segment->visited) {
+            is_closed = true;
+            contour_end_side_index = end_side_index;
+            contour_end_side = current_segment->end_side;
             break;
         }
-        current_contour = next_contour;
+        current_segment = next_segment;
     }
-    return contour_list;
+
+    // Kinda ugly code-wise, but constructing the ContourFragment in place feels
+    // like the right thing to do.
+    // TODO: Consider whether it can/should be cleaner.
+    assert(contour_end_side_index != -1);
+    dest->emplace(std::make_pair<SegmentKey, ContourFragment>(
+                {level, contour_start_side_index},
+                {line_string, level, contour_start_side_index,
+                 contour_end_side_index, contour_end_side, is_closed}));
 }
+
+// Retrieve segment in a block at a level starting at particular side_idx
+Segment * getNextSegment(Block *const block, const val_t& level,
+        const int next_start_side_index) {
+    auto iter = block->interior_segments.find({level, next_start_side_index});
+    return iter == block->interior_segments.end() ? nullptr : &(iter->second);
+}
+
+
+//======================================================
+//  PHASE 3: JOINING CONTOUR FRAGMENTS INTO CONTOURS
+//======================================================
 
 // Traverse contours inbound to the raster at a level by merging contour fragments
 void traverseInboundContours(const val_t level,
@@ -570,33 +498,76 @@ void traverseInteriorContours(const val_t level,
     }
 }
 
-// TODO: Fix after everything else has been restructured.
-void countSegments(int *total_segments = nullptr, int *unvisited_segments = nullptr) {
-//    int total = 0, unvisited = 0;
-//    for (int idx = 0; idx < (nrows - 1) * (ncols - 1); idx++) {
-//        for (auto iter = square->segments.begin(); iter != square->segments.end(); iter++) {
-//            total++;
-//            if (iter->second.visited == false) {
-//                unvisited++;
-//            }
-//        }
-//    }
-//    // If int variables were passed in, write to them.
-//    if (total_segments != nullptr && unvisited_segments != nullptr) {
-//        *total_segments = total;
-//        *unvisited_segments = unvisited;
-//    // Else just print the results
-//    } else {
-//        float percent = ((float) total) / ((float) unvisited);
-//        printf("Found %i segments, %i (%.2f%%) are unvisited.\n", total, unvisited, percent);
-//    }
+// Retrieve ContourFragment in neighboring block
+ContourFragment * getNextContour(const ContourFragment *const current_contour,
+        int *block_row, int *block_col) {
+
+    // Lookup next block based on block and end_side of current contour
+    int next_block_row = *block_row;
+    int next_block_col = *block_col;
+    switch(current_contour->end_side) {
+        case Side::LEFT:
+            next_block_col--;
+            break;
+        case Side::RIGHT:
+            next_block_col++;
+            break;
+        case Side::TOP:
+            next_block_row--;
+            break;
+        case Side::BOTTOM:
+            next_block_row++;
+            break;
+        default:
+            assert(false);
+    }
+    // Next block is out of bounds
+    if (next_block_row < 0 || next_block_row > nblocksv - 1 ||
+            next_block_col < 0 || next_block_col > nblocksh - 1) {
+        return nullptr;
+    }
+
+    // Lookup next contour in next block
+    Block *next_block = &blocks[next_block_row * nblocksh + next_block_col];
+    if (DEBUG) {
+        printf("Cur block = %d,%d, cur contour at %.1f ends at side %d on %d, next block = %d,%d\n",
+                *block_row, *block_col, current_contour->level,
+                (int) current_contour->end_side, current_contour->end_side_idx,
+                next_block_row, next_block_col);
+        printContourFragments(&blocks[*block_row * nblocksh + *block_col]);
+        printContourFragments(next_block);
+    }
+
+    *block_row = next_block_row;
+    *block_col = next_block_col;
+
+    return &(next_block->interior_fragments.at(
+            {current_contour->level, current_contour->end_side_idx}));
 }
 
-inline Point transformPoint(Point point) {
-    // point.x =  point.x * pixel_size + raster_ll.x;
-    // point.y = (-point.y + nrows) * pixel_size + raster_ll.y;
-    return point;
+// Traverse a contour at a level starting at a particular contour fragment
+//   and return it as a linked list of contour fragments
+std::list<ContourFragment *> traverseContour(ContourFragment* current_contour,
+        int block_row, int block_col) {
+
+    std::list<ContourFragment *> contour_list;
+    ContourFragment *next_contour;
+    while (true) {
+        next_contour = getNextContour(current_contour, &block_row, &block_col);
+        current_contour->visited = true;
+        contour_list.push_back(current_contour);
+        if (next_contour == nullptr || next_contour->visited) {
+            break;
+        }
+        current_contour = next_contour;
+    }
+    return contour_list;
 }
+
+
+//======================================================
+//  OUTPUT GENERATION
+//======================================================
 
 void printGeoJSON(FILE *output,
         const std::vector<std::list<ContourFragment *>> output_contours) {
@@ -624,66 +595,15 @@ void printGeoJSON(FILE *output,
     fprintf(output, "] } \n");
 }
 
-void readArguments(int argc, char **argv) {
-
-    // This directly copies the flag parsing pattern used by assignment 3.
-    _argc = argc - 1;
-    _argv = argv + 1;
-
-    // Open input file
-    input_filename = get_option_string("-f", nullptr);
-    if (!(input_file = fopen(input_filename, "r"))) {
-        printf("Unable to open file: %s.\n", input_filename);
-        exit(-1);
-    }
-
-    // Read interval size
-    interval = get_option_float("-i", interval);
-
-    // Read number of threads and set the omp variable accordingly
-    num_threads = get_option_int("-n", num_threads);
-    omp_set_num_threads(num_threads);
-
-    // Read block dimension
-    block_dim = get_option_int("-b", block_dim);
-
+inline Point transformPoint(Point point) {
+    point.x =  point.x * pixel_size + raster_ll.x;
+    point.y = (-point.y + nrows) * pixel_size + raster_ll.y;
+    return point;
 }
 
-// Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
-// Arbitary input raster files can be converted to this format with this GDAL command:
-//    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
-void readHeader(FILE *input) {
-    char str[100];
-    int ret;
-    ret = std::fscanf(input, "%s %d", str, &ncols);
-    assert(ret > 0 && std::strcmp(str, "ncols") == 0);
-    ret = std::fscanf(input, "%s %d", str, &nrows);
-    assert(ret > 0 && std::strcmp(str, "nrows") == 0);
-    ret = std::fscanf(input, "%s %lf", str, &raster_ll.x);
-    assert(ret > 0 && std::strcmp(str, "xllcorner") == 0);
-    ret = std::fscanf(input, "%s %lf", str, &raster_ll.y);
-    assert(ret > 0 && std::strcmp(str, "yllcorner") == 0);
-    ret = std::fscanf(input, "%s %lf", str, &pixel_size);
-    assert(ret > 0 && std::strcmp(str, "cellsize") == 0);
-}
-
-std::vector<val_t> determineLevels(val_t interval, val_t val_min, val_t val_max) {
-    // By default, generate contours for 10 levels, equally spaced between val_min and val_max.
-    if (interval < 0) {
-        interval = (val_max - val_min) / 10.0;
-    }
-
-    // Populate levels every <interval> starting just below val_min to just above val_max
-    std::vector<val_t> levels;
-    val_t val;
-    for (val = val_min - fmod(val_min, interval); val < val_max; val += interval) {
-        levels.push_back(val);
-    }
-    levels.push_back(val);
-
-    return levels;
-
-}
+//======================================================
+//  PROFILING AND DEBUGGING
+//======================================================
 
 void profileTime(std::string message) {
     auto new_time = Time::now();
@@ -695,44 +615,47 @@ void profileTime(std::string message) {
 
 std::string sideToString(Side side) {
     switch(side) {
-        case Side::TOP:
-            return "TOP";
-        case Side::BOTTOM:
-            return "BOTTOM";
-        case Side::LEFT:
-            return "LEFT";
-        case Side::RIGHT:
-            return "RIGHT";
-        case Side::ANY:
-            return "ANY";
-        default:
-            return "OTHER";
+        case Side::TOP:     return "TOP";
+        case Side::BOTTOM:  return "BOT";
+        case Side::LEFT:    return "LEFT";
+        case Side::RIGHT:   return "RIGHT";
+        case Side::ANY:     return "ANY";
+        default:            return "OTHER";
     }
 }
+
+void printSegment(val_t level, Segment *cs) {
+    printf("Segment @ level %.1f @ square (%d, %d), start (%.1f, %.1f), end (%.1f, %.1f)\n",
+            level, cs->square_row, cs->square_col, cs->start.x, cs->start.y, cs->end.x, cs->end.y);
+}
+
+
+void printContourFragment(ContourFragment *cf) {
+    printf("Contour @ level %.1f has %zu vertices from side %3d to %3d (%s): (%.1f,%.1f)->(%.1f,%.1f)\n",
+        cf->level, cf->line_string->size(), cf->start_side_idx, cf->end_side_idx, sideToString(cf->end_side).c_str(),
+        (*(cf->line_string))[0].x, (*(cf->line_string))[0].y,
+        (*(cf->line_string))[cf->line_string->size() - 1].x,
+        (*(cf->line_string))[cf->line_string->size() - 1].y);
+}
+
 
 void printContourFragments(Block *block) {
 
     printf("Contents of block with UL corner at %d,%d:\n", block->first_row, block->first_col);
     printf("  Inbound fragments (n = %zu)\n", block->inbound_fragments.size());
     for (auto& kv_pair : block->inbound_fragments) {
-        ContourFragment *c = &(kv_pair.second);
-        printf("    Level %5.1f, %zu vertices, side idx %3d to %3d, end side %6s: (%4.1f, %4.1f) -> (%4.1f, %4.1f)\n",
-                c->level, c->line_string->size(), c->start_side_idx, c->end_side_idx, sideToString(c->end_side).c_str(),
-                (*(c->line_string))[0].x, (*(c->line_string))[0].y,
-                (*(c->line_string))[c->line_string->size() - 1].x,
-                (*(c->line_string))[c->line_string->size() - 1].y);
+        printf("    ");
+        printContourFragment(&(kv_pair.second));
     }
     printf("  Interior fragments (n = %zu)\n", block->interior_fragments.size());
     for (auto& kv_pair : block->interior_fragments) {
-        ContourFragment *c = &(kv_pair.second);
-        printf("    Level %5.1f, %zu vertices, side idx %3d to %3d, end side %6s: (%4.1f, %4.1f) -> (%4.1f, %4.1f)\n",
-                c->level, c->line_string->size(), c->start_side_idx, c->end_side_idx, sideToString(c->end_side).c_str(),
-                (*(c->line_string))[0].x, (*(c->line_string))[0].y,
-                (*(c->line_string))[c->line_string->size() - 1].x,
-                (*(c->line_string))[c->line_string->size() - 1].y);
+        printf("    ");
+        printContourFragment(&(kv_pair.second));
     }
 
 }
+
+
 
 int main(int argc, char **argv) {
 
@@ -812,7 +735,7 @@ int main(int argc, char **argv) {
                 traverseClosedContourFragments(block, level);
             }
 
-            printContourFragments(block);
+            if (DEBUG) printContourFragments(block);
 
         }
     }
@@ -825,9 +748,9 @@ int main(int argc, char **argv) {
         # pragma omp for schedule(static) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
-            printf("PROCESSING INBOUND CONTOURS FOR LEVEL = %.1f\n", level);
+            if (DEBUG) printf("PROCESSING INBOUND CONTOURS FOR LEVEL = %.1f\n", level);
             traverseInboundContours(level, &output_contours);
-            printf("PROCESSING INTERIOR CONTOURS FOR LEVEL = %.1f\n", level);
+            if (DEBUG) printf("PROCESSING INTERIOR CONTOURS FOR LEVEL = %.1f\n", level);
             traverseInteriorContours(level, &output_contours);
         }
     }
