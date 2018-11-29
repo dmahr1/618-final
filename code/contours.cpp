@@ -1,5 +1,7 @@
 #include "contours.h"
 
+#include <sstream>
+
 using Time = std::chrono::high_resolution_clock;
 
 
@@ -761,9 +763,8 @@ int main(int argc, char **argv) {
                 traverseNonClosedContourFragments(block, level);
                 traverseClosedContourFragments(block, level);
             }
-
+            
             if (DEBUG) printContourFragments(block);
-
         }
     }
     profileTime("Contour fragments generation");
