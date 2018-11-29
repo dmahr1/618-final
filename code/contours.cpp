@@ -14,6 +14,7 @@ const char *input_filename;
 val_t interval = -1.0;  // Negative means subdivide into 10
 int num_threads = 1;
 int block_dim = 32;
+bool skip_writing_output;
 
 // Globals from input file's header
 int nrows, ncols;
@@ -83,6 +84,15 @@ float get_option_float(const char *option_name, float default_value) {
     return default_value;
 }
 
+bool get_option_bool(const char *option_name) {
+    for (int i = _argc - 2; i >= 0; i -= 2) {
+        if (strcmp(_argv[i], option_name) == 0) {
+            return strcmp(_argv[i + 1], "true") == 0;
+        }
+    }
+    return false;
+}
+
 void readArguments(int argc, char **argv) {
 
     // This directly copies the flag parsing pattern used by assignment 3.
@@ -106,6 +116,9 @@ void readArguments(int argc, char **argv) {
     // Read block dimension
     block_dim = get_option_int("-b", block_dim);
 
+    // Read benchmarking mode
+    skip_writing_output = get_option_bool("-w");
+
 }
 
 // Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
@@ -126,7 +139,7 @@ void readHeader(FILE *input) {
     assert(ret > 0 && std::strcmp(str, "cellsize") == 0);
 }
 
-std::vector<val_t> determineLevels(val_t interval, val_t val_min, val_t val_max) {
+std::vector<val_t> determineLevels(val_t &interval, val_t val_min, val_t val_max) {
     // By default, generate contours for 10 levels, equally spaced between val_min and val_max.
     if (interval < 0) {
         interval = (val_max - val_min) / 10.0;
@@ -774,11 +787,16 @@ int main(int argc, char **argv) {
     }
     profileTime("Contour joining");
 
-    char output_filename[100];
-    sprintf(output_filename, "output_%s.txt", basename(input_filename));
-    FILE *output_file = fopen(output_filename, "w");
-    printGeoJSON(output_file, output_contours);
-    fclose(output_file);
+    if (skip_writing_output) {
+        printf("Skipping writing of output file\n");
+    } else {
+        char output_filename[100];
+        sprintf(output_filename, "output_%s.txt", basename(input_filename));
+        FILE *output_file = fopen(output_filename, "w");
+        printGeoJSON(output_file, output_contours);
+        fclose(output_file);
+        profileTime("File writing");
+    }
 
     return 0;
 }

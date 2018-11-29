@@ -78,6 +78,15 @@ typedef struct {
     std::unordered_map<SegmentKey, ContourFragment, pair_hash> interior_fragments;
 } Block;
 
+// Input handling
+int get_option_int(const char *option_name, int default_value);
+const char *get_option_string(const char *option_name, const char *default_value);
+float get_option_float(const char *option_name, float default_value);
+bool get_option_bool(const char *option_name);
+void readArguments(int argc, char **argv);
+void readHeader(FILE *input);
+std::vector<val_t> determineLevels(val_t &interval, val_t val_min, val_t val_max);
+
 // Phase 1: Marching squares
 void processSquare(Block *const block, const int row, const int col,
         const std::vector<val_t>& levels);
