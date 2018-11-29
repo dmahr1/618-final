@@ -456,6 +456,7 @@ void traverseInboundContours(const val_t level,
     // Iterate over all blocks
     for (int block_row = 0; block_row < nblocksv; block_row++) {
         for (int block_col = 0; block_col < nblocksh; block_col++) {
+
             // Skip non-perimeter blocks
             if (block_row > 0 && block_row < nblocksv - 1 &&
                     block_col > 0 && block_col < nblocksh - 1) {
@@ -468,8 +469,13 @@ void traverseInboundContours(const val_t level,
                     continue;
                 }
                 assert(kv_pair.second.visited == false);
-                output_contours->push_back(traverseContour(&(kv_pair.second),
-                        block_row, block_col));
+                std::list<ContourFragment *> contour;
+                contour = traverseContour(&(kv_pair.second), block_row, block_col);
+                // Atomatically add contour to global vector
+                #pragma omp critical
+                {
+                    output_contours->push_back(contour);
+                }
             }
         }
     }
@@ -487,12 +493,20 @@ void traverseInteriorContours(const val_t level,
                 if (kv_pair.second.level != level || kv_pair.second.visited) {
                     continue;
                 }
+                // If contour fragment is closed within this block, add it as 1-element list
+                std::list<ContourFragment *> contour;
                 if (kv_pair.second.is_closed) {
-                    output_contours->push_back(std::list<ContourFragment *>({&(kv_pair.second)}));
+                    contour = {&(kv_pair.second)};
+                // Else perform full traversal
                 } else {
-                    output_contours->push_back(traverseContour(&(kv_pair.second),
-                            block_row, block_col));
+                    contour = traverseContour(&(kv_pair.second), block_row, block_col);
                 }
+                // Atomatically add contour to global vector
+                #pragma omp critical
+                {
+                    output_contours->push_back(contour);
+                }
+
             }
         }
     }
@@ -569,25 +583,29 @@ std::list<ContourFragment *> traverseContour(ContourFragment* current_contour,
 //  OUTPUT GENERATION
 //======================================================
 
-void printGeoJSON(FILE *output,
-        const std::vector<std::list<ContourFragment *>> output_contours) {
+void printGeoJSON(FILE *output, const std::vector<std::list<ContourFragment *>> output_contours) {
+
+    // Iterate over contours (i.e. linked lists of contour fragments)
     fprintf(output,  "{ \"type\":\"FeatureCollection\", \"features\": [\n");
-    ContourFragment *contour;
     for (size_t i = 0; i < output_contours.size(); i++) {
-        contour = output_contours[i].front();
         fprintf(output, "{ \"type\":\"Feature\", ");
-        fprintf(output, "\"properties\": {\"level\":%.2f}, ", contour->level);
+        fprintf(output, "\"properties\": {\"level\":%.2f}, ", output_contours[i].front()->level);
         fprintf(output, "\"geometry\":{ \"type\":\"LineString\", \"coordinates\": [");
+
+        // Iterate over contour fragments in contour
         size_t num_fragments = output_contours[i].size();
         size_t fragment_num = 0;
         for (ContourFragment *contour : output_contours[i]) {
-            for (size_t j = 0; j < contour->line_string->size(); j++) {
+
+            // Iterate over vertices in contour fragment, skipping 1st vertex if not 1st fragment
+            size_t num_vertices = contour->line_string->size();
+            for (size_t j = (fragment_num == 0) ? 0 : 1; j < num_vertices; j++) {
                 Point pt = transformPoint((*(contour->line_string))[j]);
-                bool is_last_point = j == contour->line_string->size() - 1 &&
-                        fragment_num == num_fragments - 1;
+                bool is_last_point = (j == num_vertices - 1) && (fragment_num == num_fragments - 1);
                 fprintf(output, "[%.8lf,%.8lf]%s", pt.x, pt.y, is_last_point ? "" : ",");
             }
             fragment_num++;
+
         }
         fprintf(output, "] } }");
         fprintf(output, "%s\n", (i < output_contours.size() - 1) ? "," : "");
@@ -640,7 +658,6 @@ void printContourFragment(ContourFragment *cf) {
 
 
 void printContourFragments(Block *block) {
-
     printf("Contents of block with UL corner at %d,%d:\n", block->first_row, block->first_col);
     printf("  Inbound fragments (n = %zu)\n", block->inbound_fragments.size());
     for (auto& kv_pair : block->inbound_fragments) {
@@ -652,7 +669,6 @@ void printContourFragments(Block *block) {
         printf("    ");
         printContourFragment(&(kv_pair.second));
     }
-
 }
 
 
@@ -701,6 +717,8 @@ int main(int argc, char **argv) {
             input_filename, num_threads, block_dim);
     printf("Dimensions = %d x %d pixels = %d x %d squares = %d x %d blocks, each %d x %d\n",
             nrows, ncols, nrows - 1, ncols - 1, nblocksv, nblocksh, block_dim, block_dim);
+    printf("Levels = %zu intervals of size %.1f from %.1f through %.1f\n",
+            levels.size(), interval, levels.front(), levels.back());
     blocks = new Block[nblocksh * nblocksv];
     for (int ii = 0; ii < nblocksv; ii++) {
         for (int jj = 0; jj < nblocksh; jj++) {
@@ -713,7 +731,6 @@ int main(int argc, char **argv) {
     }
     profileTime("Initialization");
 
-    // Phase 1: generate segments in each square (in parallel)
     int block_num;
     # pragma omp parallel default(shared) private(block_num)
     {
@@ -739,6 +756,7 @@ int main(int argc, char **argv) {
 
         }
     }
+    profileTime("Contour fragments generation");
 
     // Phase 3
     std::vector<std::list<ContourFragment *>> output_contours;
@@ -754,6 +772,7 @@ int main(int argc, char **argv) {
             traverseInteriorContours(level, &output_contours);
         }
     }
+    profileTime("Contour joining");
 
     char output_filename[100];
     sprintf(output_filename, "output_%s.txt", basename(input_filename));
