@@ -159,115 +159,118 @@ std::vector<val_t> determineLevels(val_t &interval, val_t val_min, val_t val_max
 //  PHASE 1: MARCHING SQUARES PROCESSING
 //======================================================
 
-// Populate square whose top-left pixel is  at (row, col).
-void processSquare(Block *const block, const int row, const int col,
-        const std::vector<val_t>& levels) {
-    assert(row < nrows - 1 && col < ncols - 1);
+// Process block with with first row and column at block->first_row, block->first_col.
+void processBlock(Block *const block, const std::vector<val_t>& levels) {
+    // Iterate over all squares in the block.
+    for (int row = block->first_row; row < block->first_row + block->num_rows; row++) {
+        for (int col = block->first_col; col < block->first_col + block->num_cols; col++) {
+            // Process square whose top-left pixel is  at (row, col).
+            // Get pixel values at corners around this square
+            val_t ll = input_array[(row + 1) * ncols + col];
+            val_t lr = input_array[(row + 1) * ncols + col + 1];
+            val_t ur = input_array[row * ncols + col + 1];
+            val_t ul = input_array[row * ncols + col];
+            val_t pixel_min = std::min(ll, std::min(lr, std::min(ur, ul)));
+            val_t pixel_max = std::max(ll, std::max(lr, std::max(ur, ul)));
 
-    // Get pixel values at corners around this square
-    val_t ll = input_array[(row + 1) * ncols + col];
-    val_t lr = input_array[(row + 1) * ncols + col + 1];
-    val_t ur = input_array[row * ncols + col + 1];
-    val_t ul = input_array[row * ncols + col];
-    val_t pixel_min = std::min(ll, std::min(lr, std::min(ur, ul)));
-    val_t pixel_max = std::max(ll, std::max(lr, std::max(ur, ul)));
+            // Temporary buffer of segments for a single level at a single square (up to 2).
+            std::vector<std::pair<Side, Side>> start_end_sides(2);
 
-    // Temporary buffer of segments for a single level at a single square
-    std::vector<std::pair<Side, Side>> start_end_sides;
+            // Iterate over all levels, skipping those that are out of range for these pixels
+            for (const auto& level : levels) {
+                if (level < pixel_min || level > pixel_max) {
+                    continue;
+                }
+                // TODO: figure out if this is right thing to do regarding tolerance?
+                uint8_t key = 0;
+                key |= (ll > level) ? LL_ABOVE : 0;
+                key |= (lr > level) ? LR_ABOVE : 0;
+                key |= (ur > level) ? UR_ABOVE : 0;
+                key |= (ul > level) ? UL_ABOVE : 0;
 
-    // Iterate over all levels, skipping those that are out of range for these pixels
-    for (const auto& level : levels) {
-        if (level < pixel_min || level > pixel_max) {
-            continue;
+                // We define the upper-left pixel to be the point at coordinates (row,col)
+                // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669.
+                // TODO: ^^ are we sure about this?
+                coord_t top = (coord_t) row;
+                coord_t left = (coord_t) col;
+
+                start_end_sides.clear(); // Always empty sides from the previous square
+
+                switch(key) {
+                    // Cases where 1 pixel is above the level
+                    case (LL_ABOVE): // Case 1 = 0001
+                        start_end_sides.push_back({Side::LEFT, Side::BOTTOM});
+                        break;
+                    case (LR_ABOVE): // Case 2 = 0010
+                        start_end_sides.push_back({Side::BOTTOM, Side::RIGHT});
+                        break;
+                    case (UR_ABOVE): // Case  4 = 0100
+                        start_end_sides.push_back({Side::RIGHT, Side::TOP});
+                        break;
+                    case (UL_ABOVE): // Case  8 = 1000
+                        start_end_sides.push_back({Side::TOP, Side::LEFT});
+                        break;
+                    // Cases where 3 pixels are above the level
+                    case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
+                        start_end_sides.push_back({Side::LEFT, Side::TOP});
+                        break;
+                    case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
+                        start_end_sides.push_back({Side::TOP, Side::RIGHT});
+                        break;
+                    case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
+                        start_end_sides.push_back({Side::RIGHT, Side::BOTTOM});
+                        break;
+                    case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
+                        start_end_sides.push_back({Side::BOTTOM, Side::LEFT});
+                        break;
+                    // Cases where 2 adjacent pixels are above the level
+                    case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
+                        start_end_sides.push_back({Side::LEFT, Side::RIGHT});
+                        break;
+                    case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
+                        start_end_sides.push_back({Side::BOTTOM, Side::TOP});
+                        break;
+                    case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
+                        start_end_sides.push_back({Side::TOP, Side::BOTTOM});
+                        break;
+                    case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
+                        start_end_sides.push_back({Side::RIGHT, Side::LEFT});
+                        break;
+                    // TODO(maybe): disambiguate saddle points.
+                    // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
+                    case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
+                        start_end_sides.push_back({Side::LEFT, Side::TOP});
+                        start_end_sides.push_back({Side::RIGHT, Side::BOTTOM});
+                        break;
+                    case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
+                        start_end_sides.push_back({Side::TOP, Side::RIGHT});
+                        start_end_sides.push_back({Side::BOTTOM, Side::LEFT});
+                        break;
+                }
+
+                // Iterate over the 1 or 2 segments in start_end_sides
+                for (const auto& start_end_side : start_end_sides) {
+
+                    // Determine which map this segment should be added to, either the
+                    // block's inbound_segments map or the block's interior_segments map.
+                    std::unordered_map<SegmentKey, Segment, pair_hash> *destination;
+                    if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
+                        destination = &(block->inbound_segments);
+                    } else {
+                        destination = &(block->interior_segments);
+                    }
+
+                    // Construct the segment and add it to the appropriate map
+                    int start_side_index = computeSideIndex(row, col, start_end_side.first);
+                    bool is_inbound_to_raster = segmentIsInboundToRaster(row, col, start_end_side.first);
+                    destination->insert({{level, start_side_index},
+                            Segment(start_end_side.first, start_end_side.second,
+                                row, col, level, is_inbound_to_raster,
+                                top, left, ll, lr, ur, ul)});
+                }
+           }
         }
-        // TODO: figure out if this is right thing to do regarding tolerance?
-        uint8_t key = 0;
-        key |= (ll > level) ? LL_ABOVE : 0;
-        key |= (lr > level) ? LR_ABOVE : 0;
-        key |= (ur > level) ? UR_ABOVE : 0;
-        key |= (ul > level) ? UL_ABOVE : 0;
-
-        // We define the upper-left pixel to be the point at coordinates (row,col)
-        // No need to add 0.5 to each, see https://gis.stackexchange.com/a/122687/4669.
-        // TODO: ^^ are we sure about this?
-        coord_t top = (coord_t) row;
-        coord_t left = (coord_t) col;
-
-        start_end_sides.clear(); // Always empty sides from the previous square
-
-        switch(key) {
-            // Cases where 1 pixel is above the level
-            case (LL_ABOVE): // Case 1 = 0001
-                start_end_sides.push_back({Side::LEFT, Side::BOTTOM});
-                break;
-            case (LR_ABOVE): // Case 2 = 0010
-                start_end_sides.push_back({Side::BOTTOM, Side::RIGHT});
-                break;
-            case (UR_ABOVE): // Case  4 = 0100
-                start_end_sides.push_back({Side::RIGHT, Side::TOP});
-                break;
-            case (UL_ABOVE): // Case  8 = 1000
-                start_end_sides.push_back({Side::TOP, Side::LEFT});
-                break;
-            // Cases where 3 pixels are above the level
-            case (UR_ABOVE | LR_ABOVE | LL_ABOVE): // Case  7 = 0111
-                start_end_sides.push_back({Side::LEFT, Side::TOP});
-                break;
-            case (UL_ABOVE | LL_ABOVE | LR_ABOVE): // Case 11 = 1011
-                start_end_sides.push_back({Side::TOP, Side::RIGHT});
-                break;
-            case (UL_ABOVE | UR_ABOVE | LL_ABOVE): // Case 13 = 1101
-                start_end_sides.push_back({Side::RIGHT, Side::BOTTOM});
-                break;
-            case (UL_ABOVE | UR_ABOVE | LR_ABOVE): // Case 14 = 1110
-                start_end_sides.push_back({Side::BOTTOM, Side::LEFT});
-                break;
-            // Cases where 2 adjacent pixels are above the level
-            case (LL_ABOVE | LR_ABOVE): // Case  3 = 0011
-                start_end_sides.push_back({Side::LEFT, Side::RIGHT});
-                break;
-            case (UR_ABOVE | LR_ABOVE): // Case  6 = 0110
-                start_end_sides.push_back({Side::BOTTOM, Side::TOP});
-                break;
-            case (UL_ABOVE | LL_ABOVE): // Case  9 = 1001
-                start_end_sides.push_back({Side::TOP, Side::BOTTOM});
-                break;
-            case (UL_ABOVE | UR_ABOVE): // Case 12 = 1100
-                start_end_sides.push_back({Side::RIGHT, Side::LEFT});
-                break;
-            // TODO(maybe): disambiguate saddle points.
-            // Cases where 2 non-adjacent pixels are above the level, i.e. a saddle
-            case (LL_ABOVE | UR_ABOVE): // Case  5 = 0101
-                start_end_sides.push_back({Side::LEFT, Side::TOP});
-                start_end_sides.push_back({Side::RIGHT, Side::BOTTOM});
-                break;
-            case (UL_ABOVE | LR_ABOVE): // Case 10 = 1010
-                start_end_sides.push_back({Side::TOP, Side::RIGHT});
-                start_end_sides.push_back({Side::BOTTOM, Side::LEFT});
-                break;
-        }
-
-        // Iterate over the 1 or 2 segments in start_end_sides
-        for (const auto& start_end_side : start_end_sides) {
-
-            // Determine which map this segment should be added to, either the
-            // block's inbound_segments map or the block's interior_segments map.
-            std::unordered_map<SegmentKey, Segment, pair_hash> *destination;
-            if (segmentIsInboundToBlock(block, row, col, start_end_side.first)) { // inbound segment
-                destination = &(block->inbound_segments);
-            } else {
-                destination = &(block->interior_segments);
-            }
-
-            // Construct the segment and add it to the appropriate map
-            int start_side_index = computeSideIndex(row, col, start_end_side.first);
-            bool is_inbound_to_raster = segmentIsInboundToRaster(row, col, start_end_side.first);
-            destination->insert({{level, start_side_index},
-                    Segment(start_end_side.first, start_end_side.second,
-                        row, col, level, is_inbound_to_raster,
-                        top, left, ll, lr, ur, ul)});
-        }
-   }
+    }
 }
 
 inline val_t interpolate(const val_t left_or_top, const val_t right_or_bottom, const val_t level) {
@@ -339,7 +342,7 @@ inline bool segmentIsInboundToRaster(const int row, const int col, const Side si
     }
 }
 
-inline int computeSideIndex(int square_row, int square_col, Side side) {
+inline int computeSideIndex(const int square_row, const int square_col, const Side side) {
     // Assume horizontal sides are numbered first, then vertical.
     switch(side) {
         case (Side::TOP):
@@ -444,10 +447,9 @@ void traverseContourFragment(Block *const block, const val_t& level,
     // like the right thing to do.
     // TODO: Consider whether it can/should be cleaner.
     assert(contour_end_side_index != -1);
-    dest->emplace(std::make_pair<SegmentKey, ContourFragment>(
-                {level, contour_start_side_index},
-                {line_string, level, contour_start_side_index,
-                 contour_end_side_index, contour_end_side, is_closed}));
+    dest->insert({{level, contour_start_side_index},
+            {line_string, level, contour_start_side_index,
+            contour_end_side_index, contour_end_side, is_closed}});
 }
 
 // Retrieve segment in a block at a level starting at particular side_idx
@@ -747,20 +749,15 @@ int main(int argc, char **argv) {
     int block_num;
     # pragma omp parallel default(shared) private(block_num)
     {
-        # pragma omp for schedule(static) nowait
+        # pragma omp for schedule(dynamic) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
-
+            //printf("Thread %d does phase 1 of block %d\n", omp_get_thread_num(), block_num);
             // Phase 1
             Block *block = &blocks[block_num];
-            for (int i = block->first_row; i < block->first_row + block->num_rows; i++) {
-                for (int j = block->first_col; j < block->first_col + block->num_cols; j++) {
-                    processSquare(block, i, j, levels);
-                }
-            }
+            processBlock(block, levels);
 
             // Phase 2
-            for (size_t i = 0; i < levels.size(); i++) {
-                const auto& level = levels[i];
+            for (const auto& level : levels) {
                 traverseNonClosedContourFragments(block, level);
                 traverseClosedContourFragments(block, level);
             }
@@ -776,7 +773,7 @@ int main(int argc, char **argv) {
     size_t i;
     # pragma omp parallel default (shared) private(i)
     {
-        # pragma omp for schedule(static) nowait
+        # pragma omp for schedule(dynamic) nowait
         for (i = 0; i < levels.size(); i++) {
             const auto& level = levels[i];
             if (DEBUG) printf("PROCESSING INBOUND CONTOURS FOR LEVEL = %.1f\n", level);
