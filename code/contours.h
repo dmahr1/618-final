@@ -8,6 +8,7 @@
 #include <memory>
 #include <random>
 #include <unordered_map>
+#include <map>
 #include <vector>
 
 #include <assert.h>

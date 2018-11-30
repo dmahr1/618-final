@@ -1,7 +1,5 @@
 #include "contours.h"
 
-#include <sstream>
-
 using Time = std::chrono::high_resolution_clock;
 
 
@@ -30,6 +28,7 @@ int nblocksh, nblocksv;
 Block *blocks;
 auto prev_time = Time::now();
 bool DEBUG = false;
+std::map<std::string, int64_t> elapsedTimes;
 
 
 //======================================================
@@ -426,7 +425,6 @@ void traverseContourFragment(Block *const block, const val_t& level,
     Segment *next_segment;
     bool is_closed = false;
     while (true) {
-        if (DEBUG) printSegment(level, current_segment);
         int end_side_index = computeSideIndex(current_segment->square_row,
                 current_segment->square_col, current_segment->end_side);
         next_segment = getNextSegment(block, level, end_side_index);
@@ -560,15 +558,6 @@ ContourFragment * getNextContour(const ContourFragment *const current_contour,
 
     // Lookup next contour in next block
     Block *next_block = &blocks[next_block_row * nblocksh + next_block_col];
-    if (DEBUG) {
-        printf("Cur block = %d,%d, cur contour at %.1f ends at side %d on %d, next block = %d,%d\n",
-                *block_row, *block_col, current_contour->level,
-                (int) current_contour->end_side, current_contour->end_side_idx,
-                next_block_row, next_block_col);
-        printContourFragments(&blocks[*block_row * nblocksh + *block_col]);
-        printContourFragments(next_block);
-    }
-
     *block_row = next_block_row;
     *block_col = next_block_col;
 
@@ -640,12 +629,30 @@ inline Point transformPoint(Point point) {
 //  PROFILING AND DEBUGGING
 //======================================================
 
-void profileTime(std::string message) {
-    auto new_time = Time::now();
-    auto duration = new_time - prev_time;
+void profileTime(std::string message,
+        std::chrono::time_point<std::chrono::high_resolution_clock> &prev_time) {
+    auto duration = Time::now() - prev_time;
     auto duration_microsecs = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-    std::cout << message << " = " << duration_microsecs << " microseconds\n";
-    prev_time = new_time;
+    #pragma omp critical
+    {
+        if (elapsedTimes.count(message) == 0) {
+            elapsedTimes.insert({message, 0});
+        }
+        elapsedTimes[message] += duration_microsecs;
+    }
+    prev_time = Time::now();
+}
+
+void printProfiling() {
+    printf("-------------Profiling results-------------\n");
+    double total = 0, cur;
+    // Iterate over profiling entries (in alphabetical order due to std::map)
+    for (auto iter = elapsedTimes.begin(); iter != elapsedTimes.end(); iter++) {
+        cur = (double) iter->second / 1e6;
+        total += cur;
+        printf("%-25s = %7.4f seconds\n", iter->first.c_str(), cur);
+    }
+    printf("%-25s = %7.4f seconds\n", "Total profiled time", total);
 }
 
 std::string sideToString(Side side) {
@@ -746,44 +753,48 @@ int main(int argc, char **argv) {
             block->num_cols = std::min(block_dim, ncols - 1 - block->first_col);
         }
     }
-    profileTime("Initialization");
+    profileTime("0.  Initialization", prev_time);
 
     int block_num;
-    # pragma omp parallel default(shared) private(block_num)
+    # pragma omp parallel default(shared) private(block_num, prev_time)
     {
         # pragma omp for schedule(dynamic) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
+            prev_time = Time::now();
             //printf("Thread %d does phase 1 of block %d\n", omp_get_thread_num(), block_num);
             // Phase 1
             Block *block = &blocks[block_num];
             processBlock(block, levels);
+            profileTime("1.  Segment generation", prev_time);
 
             // Phase 2
             for (const auto& level : levels) {
                 traverseNonClosedContourFragments(block, level);
+                profileTime("2a. Non-closed traversal", prev_time);
                 traverseClosedContourFragments(block, level);
+                profileTime("2b. Closed traversal", prev_time);
             }
-            
+
             if (DEBUG) printContourFragments(block);
         }
     }
-    profileTime("Contour fragments generation");
+
 
     // Phase 3
     std::vector<std::list<ContourFragment *>> output_contours;
     size_t i;
-    # pragma omp parallel default (shared) private(i)
+    # pragma omp parallel default (shared) private(i, prev_time)
     {
         # pragma omp for schedule(dynamic) nowait
         for (i = 0; i < levels.size(); i++) {
+            prev_time = Time::now();
             const auto& level = levels[i];
-            if (DEBUG) printf("PROCESSING INBOUND CONTOURS FOR LEVEL = %.1f\n", level);
             traverseInboundContours(level, &output_contours);
-            if (DEBUG) printf("PROCESSING INTERIOR CONTOURS FOR LEVEL = %.1f\n", level);
+            profileTime("3a. Inbound traversal", prev_time);
             traverseInteriorContours(level, &output_contours);
+            profileTime("3b. Interior traversal", prev_time);
         }
     }
-    profileTime("Contour joining");
 
     if (skip_writing_output) {
         printf("Skipping writing of output file\n");
@@ -793,8 +804,10 @@ int main(int argc, char **argv) {
         FILE *output_file = fopen(output_filename, "w");
         printGeoJSON(output_file, output_contours);
         fclose(output_file);
-        profileTime("File writing");
+        profileTime("4.  File writing", prev_time);
     }
+
+    printProfiling();
 
     return 0;
 }
