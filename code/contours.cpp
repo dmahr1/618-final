@@ -26,7 +26,6 @@ FILE *input_file;
 val_t *input_array;
 int nblocksh, nblocksv;
 Block *blocks;
-auto prev_time = Time::now();
 bool DEBUG = false;
 std::map<std::string, int64_t> elapsedTimes;
 
@@ -645,14 +644,10 @@ void profileTime(std::string message,
 
 void printProfiling() {
     printf("-------------Profiling results-------------\n");
-    double total = 0, cur;
     // Iterate over profiling entries (in alphabetical order due to std::map)
     for (auto iter = elapsedTimes.begin(); iter != elapsedTimes.end(); iter++) {
-        cur = (double) iter->second / 1e6;
-        total += cur;
-        printf("%-25s = %7.4f seconds\n", iter->first.c_str(), cur);
+        printf("%-25s = %7.4f seconds\n", iter->first.c_str(), (double) iter->second / 1e6);
     }
-    printf("%-25s = %7.4f seconds\n", "Total profiled time", total);
 }
 
 std::string sideToString(Side side) {
@@ -698,6 +693,9 @@ void printContourFragments(Block *block) {
 
 
 int main(int argc, char **argv) {
+
+    auto prev_time = Time::now();
+    auto prev_time2 = Time::now();
 
     // Parse command line arguments
     readArguments(argc, argv);
@@ -754,30 +752,48 @@ int main(int argc, char **argv) {
         }
     }
     profileTime("0.  Initialization", prev_time);
+    profileTime("Wall time: init", prev_time2);
 
     int block_num;
-    # pragma omp parallel default(shared) private(block_num, prev_time)
+    Block localBlock;
+    # pragma omp parallel default(shared) private(block_num, prev_time, localBlock)
     {
         # pragma omp for schedule(dynamic) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
             prev_time = Time::now();
-            //printf("Thread %d does phase 1 of block %d\n", omp_get_thread_num(), block_num);
+            localBlock.first_row = (&blocks[block_num])->first_row;
+            localBlock.first_col = (&blocks[block_num])->first_col;
+            localBlock.num_rows = (&blocks[block_num])->num_rows;
+            localBlock.num_cols = (&blocks[block_num])->num_cols;
+            profileTime("1a. Copying block info", prev_time);
+            localBlock.inbound_segments.clear();
+            localBlock.interior_segments.clear();
+            localBlock.inbound_fragments.clear();
+            localBlock.interior_fragments.clear();
+            profileTime("1b. Clearing maps", prev_time);
             // Phase 1
-            Block *block = &blocks[block_num];
-            processBlock(block, levels);
-            profileTime("1.  Segment generation", prev_time);
+            processBlock(&localBlock, levels);
+            // processBlock(&blocks[block_num], levels);
+            profileTime("1c. Segment generation", prev_time);
 
             // Phase 2
             for (const auto& level : levels) {
-                traverseNonClosedContourFragments(block, level);
+                traverseNonClosedContourFragments(&localBlock, level);
+                // traverseNonClosedContourFragments(&blocks[block_num], level);
                 profileTime("2a. Non-closed traversal", prev_time);
-                traverseClosedContourFragments(block, level);
+                traverseClosedContourFragments(&localBlock, level);
+                // traverseClosedContourFragments(&blocks[block_num], level);
                 profileTime("2b. Closed traversal", prev_time);
             }
 
-            if (DEBUG) printContourFragments(block);
+            // Copy local block to array
+            blocks[block_num].inbound_fragments = localBlock.inbound_fragments;
+            blocks[block_num].interior_fragments = localBlock.interior_fragments;
+            profileTime("2c. Copying block maps", prev_time);
+            if (DEBUG) printContourFragments(&blocks[block_num]);
         }
     }
+    profileTime("Wall time: phase 1+2", prev_time2);
 
 
     // Phase 3
@@ -807,6 +823,7 @@ int main(int argc, char **argv) {
         profileTime("4.  File writing", prev_time);
     }
 
+    profileTime("Wall time: phase 3", prev_time2);
     printProfiling();
 
     return 0;
