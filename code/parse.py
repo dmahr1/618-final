@@ -17,7 +17,7 @@ for line in sys.stdin:
         current_line.append(split[-5][:-1])                     # Number of threads
         current_line.append(split[-1])                          # Number of blocks
 
-    elif split[-1] == "microseconds":
+    elif split[-1] == "seconds":
         current_line.append(split[-2])
 
 if current_line:

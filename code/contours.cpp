@@ -755,40 +755,40 @@ int main(int argc, char **argv) {
     profileTime("Wall time: init", prev_time2);
 
     int block_num;
-    Block localBlock;
-    # pragma omp parallel default(shared) private(block_num, prev_time, localBlock)
+    Block local_block;
+    # pragma omp parallel default(shared) private(block_num, prev_time, local_block)
     {
         # pragma omp for schedule(dynamic) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
             prev_time = Time::now();
-            localBlock.first_row = (&blocks[block_num])->first_row;
-            localBlock.first_col = (&blocks[block_num])->first_col;
-            localBlock.num_rows = (&blocks[block_num])->num_rows;
-            localBlock.num_cols = (&blocks[block_num])->num_cols;
+            local_block.first_row = (&blocks[block_num])->first_row;
+            local_block.first_col = (&blocks[block_num])->first_col;
+            local_block.num_rows = (&blocks[block_num])->num_rows;
+            local_block.num_cols = (&blocks[block_num])->num_cols;
             profileTime("1a. Copying block info", prev_time);
-            localBlock.inbound_segments.clear();
-            localBlock.interior_segments.clear();
-            localBlock.inbound_fragments.clear();
-            localBlock.interior_fragments.clear();
+            local_block.inbound_segments.clear();
+            local_block.interior_segments.clear();
+            local_block.inbound_fragments.clear();
+            local_block.interior_fragments.clear();
             profileTime("1b. Clearing maps", prev_time);
             // Phase 1
-            processBlock(&localBlock, levels);
+            processBlock(&local_block, levels);
             // processBlock(&blocks[block_num], levels);
             profileTime("1c. Segment generation", prev_time);
 
             // Phase 2
             for (const auto& level : levels) {
-                traverseNonClosedContourFragments(&localBlock, level);
+                traverseNonClosedContourFragments(&local_block, level);
                 // traverseNonClosedContourFragments(&blocks[block_num], level);
                 profileTime("2a. Non-closed traversal", prev_time);
-                traverseClosedContourFragments(&localBlock, level);
+                traverseClosedContourFragments(&local_block, level);
                 // traverseClosedContourFragments(&blocks[block_num], level);
                 profileTime("2b. Closed traversal", prev_time);
             }
 
             // Copy local block to array
-            blocks[block_num].inbound_fragments = localBlock.inbound_fragments;
-            blocks[block_num].interior_fragments = localBlock.interior_fragments;
+            blocks[block_num].inbound_fragments = local_block.inbound_fragments;
+            blocks[block_num].interior_fragments = local_block.interior_fragments;
             profileTime("2c. Copying block maps", prev_time);
             if (DEBUG) printContourFragments(&blocks[block_num]);
         }
