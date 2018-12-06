@@ -442,6 +442,12 @@ void traverseContourFragment(Block *const block, const val_t& level,
         current_segment = next_segment;
     }
 
+    // TODO: Decide how many rounds of smoothing to do.
+    const int rounds_of_smoothing = 1;
+    for (int i = 0; i < rounds_of_smoothing; i++) {
+        smoothLineString(&line_string, is_closed);
+    }
+
     // Kinda ugly code-wise, but constructing the ContourFragment in place feels
     // like the right thing to do.
     // TODO: Consider whether it can/should be cleaner.
@@ -456,6 +462,45 @@ Segment * getNextSegment(Block *const block, const val_t& level,
         const int next_start_side_index) {
     auto iter = block->interior_segments.find({level, next_start_side_index});
     return iter == block->interior_segments.end() ? nullptr : &(iter->second);
+}
+
+Point chaikenInterpolate(const Point& point1, const Point& point2) {
+    return {0.75 * point1.x + 0.25 * point2.x, 0.75 * point1.y + 0.25 * point2.y};
+}
+
+// Use Chaiken's algorithm to smooth the line string underlying line_string_ptr.
+// Allocates a new vector for the smoothed output, and then swaps it into line_string_ptr
+// before returning.
+void smoothLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool is_closed) {
+    auto line_string = *line_string_ptr;
+    auto smoothed_line_string = std::make_shared<std::vector<Point>>();
+    auto length = line_string->size();
+
+    auto smoothed_length = is_closed ? 2 * length : 2 * (length - 1);
+    smoothed_line_string->reserve(smoothed_length);
+
+    // First point is a special case, depending on whether contour is closed or not.
+    if (is_closed) {
+        smoothed_line_string->push_back(chaikenInterpolate((*line_string)[0], (*line_string)[length - 1]));
+        smoothed_line_string->push_back(chaikenInterpolate((*line_string)[1], (*line_string)[0]));
+    } else {
+        smoothed_line_string->push_back((*line_string)[0]);
+    }
+
+    for (uint32_t i = 1; i < length - 1; i++) {
+        smoothed_line_string->push_back(chaikenInterpolate((*line_string)[i], (*line_string)[i - 1]));
+        smoothed_line_string->push_back(chaikenInterpolate((*line_string)[i], (*line_string)[i + 1]));
+    }
+
+    // Last point is a special case, depending on whether contour is closed or not.
+    if (is_closed) {
+        smoothed_line_string->push_back(chaikenInterpolate((*line_string)[length - 1], (*line_string)[length - 2]));
+        smoothed_line_string->push_back(chaikenInterpolate((*line_string)[length - 1], (*line_string)[0]));
+    } else {
+        smoothed_line_string->push_back((*line_string)[length - 1]);
+    }
+
+    line_string_ptr->swap(smoothed_line_string);
 }
 
 
@@ -811,6 +856,7 @@ int main(int argc, char **argv) {
             profileTime("3b. Interior traversal", prev_time);
         }
     }
+    profileTime("Wall time: phase 3", prev_time2);
 
     if (skip_writing_output) {
         printf("Skipping writing of output file\n");
@@ -823,7 +869,6 @@ int main(int argc, char **argv) {
         profileTime("4.  File writing", prev_time);
     }
 
-    profileTime("Wall time: phase 3", prev_time2);
     printProfiling();
 
     return 0;
