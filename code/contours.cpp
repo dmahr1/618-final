@@ -22,7 +22,7 @@ Point raster_ll;
 coord_t pixel_size;
 
 // Globals from other places
-FILE *input_file;
+GDALDataset *gdalDataset;
 val_t *input_array;
 int nblocksh, nblocksv;
 Block *blocks;
@@ -101,7 +101,9 @@ void readArguments(int argc, char **argv) {
 
     // Open input file
     input_filename = get_option_string("-f", nullptr);
-    if (!(input_file = fopen(input_filename, "r"))) {
+    GDALAllRegister();
+    gdalDataset = (GDALDataset *) GDALOpen(input_filename, GA_ReadOnly);
+    if (gdalDataset == NULL) {
         printf("Unable to open file: %s.\n", input_filename);
         exit(-1);
     }
@@ -121,22 +123,55 @@ void readArguments(int argc, char **argv) {
 
 }
 
-// Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
-// Arbitary input raster files can be converted to this format with this GDAL command:
-//    gdal_translate -of AAIGrid in.tif out.asc -co DECIMAL_PRECISION=3
-void readHeader(FILE *input) {
-    char str[100];
-    int ret;
-    ret = std::fscanf(input, "%s %d", str, &ncols);
-    assert(ret > 0 && std::strcmp(str, "ncols") == 0);
-    ret = std::fscanf(input, "%s %d", str, &nrows);
-    assert(ret > 0 && std::strcmp(str, "nrows") == 0);
-    ret = std::fscanf(input, "%s %lf", str, &raster_ll.x);
-    assert(ret > 0 && std::strcmp(str, "xllcorner") == 0);
-    ret = std::fscanf(input, "%s %lf", str, &raster_ll.y);
-    assert(ret > 0 && std::strcmp(str, "yllcorner") == 0);
-    ret = std::fscanf(input, "%s %lf", str, &pixel_size);
-    assert(ret > 0 && std::strcmp(str, "cellsize") == 0);
+// Read header from GDAL
+void readHeader() {
+
+    // Ensure that input file only has 1 band
+    int num_bands;
+    if ((num_bands = gdalDataset->GetRasterCount()) != 1) {
+        printf("Input must have 1 band, %s has %d\n", input_filename, num_bands);
+        exit(-1);
+    }
+
+    // Read dimensions, corner coordinate, and pixel size into globals
+    ncols = gdalDataset->GetRasterXSize();
+    nrows = gdalDataset->GetRasterYSize();
+    double geoTransform[6]; // https://gdal.org/gdal_datamodel.html#gdal_datamodel_dataset_gtm
+    assert(gdalDataset->GetGeoTransform(geoTransform) == CE_None);
+    assert(abs(geoTransform[1]) == abs(geoTransform[5]));
+    pixel_size = geoTransform[1];
+    raster_ll.x = geoTransform[0];
+    raster_ll.y = geoTransform[3] - pixel_size * (double) nrows;
+}
+
+// Read raster data into input_array using GDAL
+void readRaster(val_t *destination, val_t &val_min, val_t &val_max) {
+
+    // Read all raster data and close the input file handle
+    GDALRasterBand *rasterBand = gdalDataset->GetRasterBand(1);
+    CPLErr ret = rasterBand->RasterIO(GF_Read, 0, 0, ncols, nrows, destination,
+            ncols, nrows, GDT_Float64, 0, 0);
+    if (ret != CE_None) {
+        printf("Error reading raster!\n");
+        exit(-1);
+    }
+
+    // Get min/max values, either directly from GDAL or by inspecting the entire array
+    int minTightBound, maxTightBound;
+    val_min = rasterBand->GetMinimum(&minTightBound);
+    val_max = rasterBand->GetMaximum(&maxTightBound);
+    if (minTightBound == 0 || maxTightBound == 0) { // GDAL didn't find a tight bound
+        val_min = std::numeric_limits<double>::max();
+        val_max = std::numeric_limits<double>::lowest();
+        for (int index = 0; index < nrows * ncols; index++) {
+            val_t val = input_array[index];
+            if (val < val_min)
+                val_min = val;
+            if (val > val_max)
+                val_max = val;
+        }
+    }
+    GDALClose(gdalDataset);
 }
 
 std::vector<val_t> determineLevels(val_t &interval, val_t val_min, val_t val_max) {
@@ -697,36 +732,14 @@ int main(int argc, char **argv) {
     auto prev_time = Time::now();
     auto prev_time2 = Time::now();
 
-    // Parse command line arguments
+    // Parse command line arguments and then read header with GDAL
     readArguments(argc, argv);
+    readHeader();
 
-    // Read entire header, which is in ASCII format, to global variables.
-    readHeader(input_file);
-
-    // Initialize data structures that are proportional to the raster size. Since squares are gaps
-    // between pixels, Square should have (nrows-1) * (ncols-1) elements.
+    // Populate the input data array and min/max values
     input_array = new val_t[nrows * ncols];
-
-    // We will compute the min and max elevations in the input to determine what levels to generate
-    // contours at.
-    val_t val_min = std::numeric_limits<double>::max();
-    val_t val_max = std::numeric_limits<double>::lowest();
-
-    // Populate the input data array.
-    int index = 0, ret;
-    val_t val;
-    for (int i = 0; i < nrows; i++) {
-        for (int j = 0; j < ncols; j++) {
-            ret = std::fscanf(input_file, "%lf", &val);
-            assert(ret > 0);
-            input_array[index] = val;
-            index += 1;
-            val_min = std::min(val_min, val);
-            val_max = std::max(val_max, val);
-        }
-    }
-    // Done with the input file.
-    fclose(input_file);
+    val_t val_min, val_max;
+    readRaster(input_array, val_min, val_max);
 
     // Based on input args, min and max value of the input data, compute the levels.
     std::vector<val_t> levels = determineLevels(interval, val_min, val_max);
@@ -811,6 +824,7 @@ int main(int argc, char **argv) {
             profileTime("3b. Interior traversal", prev_time);
         }
     }
+    profileTime("Wall time: phase 3", prev_time2);
 
     if (skip_writing_output) {
         printf("Skipping writing of output file\n");
@@ -823,7 +837,6 @@ int main(int argc, char **argv) {
         profileTime("4.  File writing", prev_time);
     }
 
-    profileTime("Wall time: phase 3", prev_time2);
     printProfiling();
 
     return 0;

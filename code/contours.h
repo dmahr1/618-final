@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include "gdal_priv.h"
+
 enum class Side {TOP, BOTTOM, LEFT, RIGHT, ANY};
 constexpr uint8_t UL_ABOVE = 8;
 constexpr uint8_t UR_ABOVE = 4;
