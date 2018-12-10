@@ -15,6 +15,8 @@ val_t interval = -1.0;  // Negative means subdivide into 10
 int num_threads = 1;
 int block_dim = 32;
 bool skip_writing_output;
+bool simplify_line_string;
+int rounds_of_smoothing = 0;
 
 // Globals from input file's header
 int nrows, ncols;
@@ -119,6 +121,11 @@ void readArguments(int argc, char **argv) {
     // Read benchmarking mode
     skip_writing_output = get_option_bool("-w");
 
+    // Read line string simplification option (default: false).
+    simplify_line_string = get_option_bool("-s");
+
+    // Read number of rounds of Chaiken smoothing to apply.
+    rounds_of_smoothing = get_option_int("--chaiken", 0);
 }
 
 // Read header of ASCII grid format (https://en.wikipedia.org/wiki/Esri_grid)
@@ -442,10 +449,11 @@ void traverseContourFragment(Block *const block, const val_t& level,
         current_segment = next_segment;
     }
         
-    // TODO: Decide how many rounds of smoothing to do.
-    const int rounds_of_smoothing = 2;
-    for (int i = 0; i < rounds_of_smoothing; i++) {
+    
+    if (simplify_line_string) {
         simplifyLineString(&line_string, is_closed);
+    }
+    for (int i = 0; i < rounds_of_smoothing; i++) {
         smoothLineString(&line_string, is_closed);
     }
 
@@ -525,7 +533,7 @@ double distanceFromPointToLine(const Point& point, const Point& line_start, cons
 }
 
 void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool is_closed) {
-    const double tolerance = 100.0;
+    const double tolerance = 10.0;
     auto line_string = *line_string_ptr;
     auto length = line_string->size();
     if (length <= 2) {
