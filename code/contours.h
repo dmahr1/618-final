@@ -107,6 +107,7 @@ void traverseContourFragment(Block *const block, const val_t& level,
 Segment * getNextSegment(Block *const block, const val_t& level,
         const int next_start_side_index);
 void smoothLineString(std::shared_ptr<std::vector<Point>> *line_string, bool is_closed);
+void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool is_closed);
 
 // Phase 3: joining contour fragments into contours
 ContourFragment * getNextContour(const ContourFragment *const current_contour,

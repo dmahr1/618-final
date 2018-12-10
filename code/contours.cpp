@@ -441,10 +441,11 @@ void traverseContourFragment(Block *const block, const val_t& level,
         }
         current_segment = next_segment;
     }
-
+        
     // TODO: Decide how many rounds of smoothing to do.
-    const int rounds_of_smoothing = 1;
+    const int rounds_of_smoothing = 2;
     for (int i = 0; i < rounds_of_smoothing; i++) {
+        simplifyLineString(&line_string, is_closed);
         smoothLineString(&line_string, is_closed);
     }
 
@@ -501,6 +502,78 @@ void smoothLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool
     }
 
     line_string_ptr->swap(smoothed_line_string);
+}
+
+double distanceFromPointToLine(const Point& point, const Point& line_start, const Point& line_end) {
+    double hypotenuse_x = point.x - line_start.x;
+    double hypotenuse_y = point.y - line_start.y;
+
+    double direction_x = line_end.x - line_start.x;
+    double direction_y = line_end.y - line_start.y;
+
+    double direction_magnitude = sqrt(direction_x * direction_x + direction_y * direction_y);
+    double dot_product = hypotenuse_x * direction_x + hypotenuse_y * direction_y;
+    double scale_fator = dot_product / direction_magnitude;
+
+    double projection_x = direction_x * scale_fator;
+    double projection_y = direction_y * scale_fator;
+
+    double perpendicular_x = hypotenuse_x - projection_x;
+    double perpendicular_y = hypotenuse_y - projection_y;
+
+    return sqrt(perpendicular_x * perpendicular_x + perpendicular_y * perpendicular_y);
+}
+
+void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool is_closed) {
+    const double tolerance = 100.0;
+    auto line_string = *line_string_ptr;
+    auto length = line_string->size();
+    if (length <= 2) {
+        return;
+    }
+
+    auto simplified_line_string = std::make_shared<std::vector<Point>>();
+    simplified_line_string->push_back((*line_string)[0]);
+
+    std::vector<std::pair<uint32_t, uint32_t>> stack;
+    if (is_closed) {
+        stack.push_back({0, length - 2});
+    } else {
+        stack.push_back({0, length - 1});
+    }
+
+    while (!stack.empty()) {
+        auto index_pair = stack.back();
+        stack.pop_back();
+
+        if (index_pair.first + 1 == index_pair.second) {
+            simplified_line_string->push_back((*line_string)[index_pair.second]);
+        } else {
+            unsigned max_index = index_pair.first + 1;
+            double max_dist = 0.0;
+            for (unsigned i = index_pair.first + 1; i < index_pair.second; i++) {
+                double distance = distanceFromPointToLine((*line_string)[i], (*line_string)[index_pair.first],
+                        (*line_string)[index_pair.second]);
+
+                if (distance > max_dist) {
+                    max_dist = distance;
+                    max_index = i;
+                }
+            }
+            if (max_dist < tolerance) {
+                simplified_line_string->push_back((*line_string)[index_pair.second]);
+            } else {
+                stack.push_back({max_index, index_pair.second});
+                stack.push_back({index_pair.first, max_index});
+            }
+        }
+    }
+
+    if (is_closed) {
+        simplified_line_string->push_back((*line_string)[0]);
+    }
+
+    line_string_ptr->swap(simplified_line_string);
 }
 
 
