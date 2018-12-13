@@ -15,7 +15,7 @@ val_t interval = -1.0;  // Negative means subdivide into 10
 int num_threads = 1;
 int block_dim = 32;
 bool skip_writing_output;
-bool simplify_line_string;
+float simplify_tolerance = -1;
 int rounds_of_smoothing = 0;
 
 // Globals from input file's header
@@ -124,7 +124,7 @@ void readArguments(int argc, char **argv) {
     skip_writing_output = get_option_bool("-w");
 
     // Read line string simplification option (default: false).
-    simplify_line_string = get_option_bool("-s");
+    simplify_tolerance = get_option_float("-s", simplify_tolerance);
 
     // Read number of rounds of Chaiken smoothing to apply.
     rounds_of_smoothing = get_option_int("--chaiken", 0);
@@ -483,9 +483,8 @@ void traverseContourFragment(Block *const block, const val_t& level,
         }
         current_segment = next_segment;
     }
-        
-    
-    if (simplify_line_string) {
+
+    if (simplify_tolerance > 0.0) {
         simplifyLineString(&line_string, is_closed);
     }
     for (int i = 0; i < rounds_of_smoothing; i++) {
@@ -548,39 +547,50 @@ void smoothLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool
 }
 
 double distanceFromPointToLine(const Point& point, const Point& line_start, const Point& line_end) {
-    double hypotenuse_x = point.x - line_start.x;
-    double hypotenuse_y = point.y - line_start.y;
 
+    // Based on https://en.wikipedia.org/wiki/Distance_from_a_point_to_a_line#Vector_formulation
+
+    // Vector between line starting vertex and point
+    double hypotenuse_x = line_start.x - point.x;
+    double hypotenuse_y = line_start.y - point.y;
+
+    // Vector between line starting vertex and line ending vertex, rescaled to unit length
     double direction_x = line_end.x - line_start.x;
     double direction_y = line_end.y - line_start.y;
-
     double direction_magnitude = sqrt(direction_x * direction_x + direction_y * direction_y);
-    double dot_product = hypotenuse_x * direction_x + hypotenuse_y * direction_y;
-    double scale_fator = dot_product / direction_magnitude;
+    double unit_x = direction_x / direction_magnitude;
+    double unit_y = direction_y / direction_magnitude;
 
-    double projection_x = direction_x * scale_fator;
-    double projection_y = direction_y * scale_fator;
+    // Vector between line starting vertex and point projected onto line
+    double dot_product = hypotenuse_x * unit_x + hypotenuse_y * unit_y;
+    double projection_x = unit_x * dot_product;
+    double projection_y = unit_y * dot_product;
 
+    // Vector between point and its projection onto line
     double perpendicular_x = hypotenuse_x - projection_x;
     double perpendicular_y = hypotenuse_y - projection_y;
 
+    // Distance = L2 (Euclidean) norm
     return sqrt(perpendicular_x * perpendicular_x + perpendicular_y * perpendicular_y);
 }
 
 void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bool is_closed) {
-    const double tolerance = 10.0;
+
+    // Load line string, don't simplify if it has no intermediate points
     auto line_string = *line_string_ptr;
     auto length = line_string->size();
     if (length <= 2) {
         return;
     }
 
+    // The first vertex is always included
     auto simplified_line_string = std::make_shared<std::vector<Point>>();
     simplified_line_string->push_back((*line_string)[0]);
 
+    // Use a stack instead of recursion; initialize with start and ending vertices
     std::vector<std::pair<uint32_t, uint32_t>> stack;
     if (is_closed) {
-        stack.push_back({0, length - 2});
+        stack.push_back({0, length - 2}); // Don't include repeated starting vertex if closed
     } else {
         stack.push_back({0, length - 1});
     }
@@ -590,8 +600,10 @@ void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bo
         stack.pop_back();
 
         if (index_pair.first + 1 == index_pair.second) {
+            // No intermediate points: don't do any further simplification
             simplified_line_string->push_back((*line_string)[index_pair.second]);
         } else {
+            // Find the intermediate point that is farthest from the line and its distance
             unsigned max_index = index_pair.first + 1;
             double max_dist = 0.0;
             for (unsigned i = index_pair.first + 1; i < index_pair.second; i++) {
@@ -603,8 +615,11 @@ void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bo
                     max_index = i;
                 }
             }
-            if (max_dist < tolerance) {
+            // If max dist is less than tolerance, simplify by dropping all intermediate points and
+            //   only adding the end point
+            if (max_dist < simplify_tolerance) {
                 simplified_line_string->push_back((*line_string)[index_pair.second]);
+            // Else recurse, using the max dist point as the "pivot"
             } else {
                 stack.push_back({max_index, index_pair.second});
                 stack.push_back({index_pair.first, max_index});
@@ -612,6 +627,7 @@ void simplifyLineString(std::shared_ptr<std::vector<Point>> *line_string_ptr, bo
         }
     }
 
+    // Need to repeat first vertex for closed contour fragments
     if (is_closed) {
         simplified_line_string->push_back((*line_string)[0]);
     }
