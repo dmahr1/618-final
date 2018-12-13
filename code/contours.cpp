@@ -29,7 +29,7 @@ val_t *input_array;
 int nblocksh, nblocksv;
 Block *blocks;
 bool DEBUG = false;
-std::map<std::string, int64_t> elapsedTimes;
+std::map<std::string, int64_t> elapsedTimes[16];
 
 
 //======================================================
@@ -204,6 +204,7 @@ std::vector<val_t> determineLevels(val_t &interval, val_t val_min, val_t val_max
 // Process block with with first row and column at block->first_row, block->first_col.
 void processBlock(Block *const block, const std::vector<val_t>& levels) {
     // Iterate over all squares in the block.
+    auto prev_time = Time::now();
     for (int row = block->first_row; row < block->first_row + block->num_rows; row++) {
         for (int col = block->first_col; col < block->first_col + block->num_cols; col++) {
             // Process square whose top-left pixel is  at (row, col).
@@ -214,6 +215,9 @@ void processBlock(Block *const block, const std::vector<val_t>& levels) {
             val_t ul = input_array[row * ncols + col];
             val_t pixel_min = std::min(ll, std::min(lr, std::min(ur, ul)));
             val_t pixel_max = std::max(ll, std::max(lr, std::max(ur, ul)));
+    
+            //sprintf(buf, "1b. Read pixels - Thread %d", thread_num);
+            //profileTime(buf, prev_time);
 
             // Temporary buffer of segments for a single level at a single square (up to 2).
             std::vector<std::pair<Side, Side>> start_end_sides(2);
@@ -290,6 +294,9 @@ void processBlock(Block *const block, const std::vector<val_t>& levels) {
                         break;
                 }
 
+            //    sprintf(buf, "1c. Marching squares case - Thread %d", thread_num);
+            //    profileTime(buf, prev_time);
+
                 // Iterate over the 1 or 2 segments in start_end_sides
                 for (const auto& start_end_side : start_end_sides) {
 
@@ -310,9 +317,13 @@ void processBlock(Block *const block, const std::vector<val_t>& levels) {
                                 row, col, level, is_inbound_to_raster,
                                 top, left, ll, lr, ur, ul)});
                 }
-           }
+           
+           //     sprintf(buf, "1d. Add segments to map - Thread %d", thread_num);
+           //     profileTime(buf, prev_time);
+            }
         }
     }
+    profileTime("1b. Process block", prev_time);
 }
 
 inline val_t interpolate(const val_t left_or_top, const val_t right_or_bottom, const val_t level) {
@@ -809,21 +820,23 @@ void profileTime(std::string message,
         std::chrono::time_point<std::chrono::high_resolution_clock> &prev_time) {
     auto duration = Time::now() - prev_time;
     auto duration_microsecs = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-    #pragma omp critical
-    {
-        if (elapsedTimes.count(message) == 0) {
-            elapsedTimes.insert({message, 0});
-        }
-        elapsedTimes[message] += duration_microsecs;
+    auto& times = elapsedTimes[omp_get_thread_num()];
+    if (times.count(message) == 0) {
+        times.insert({message, 0});
     }
+    times[message] += duration_microsecs;
     prev_time = Time::now();
 }
 
 void printProfiling() {
     printf("-------------Profiling results-------------\n");
     // Iterate over profiling entries (in alphabetical order due to std::map)
-    for (auto iter = elapsedTimes.begin(); iter != elapsedTimes.end(); iter++) {
-        printf("%-25s = %7.4f seconds\n", iter->first.c_str(), (double) iter->second / 1e6);
+    for (int i = 0; i < omp_get_max_threads(); i++) {
+        printf("Thread %d:\n", i);
+        for (auto iter = elapsedTimes[i].begin(); iter != elapsedTimes[i].end(); iter++) {
+            printf("%-25s = %7.4f seconds\n", iter->first.c_str(), (double) iter->second / 1e6);
+        }
+        printf("-----------------------------------\n");
     }
 }
 
@@ -870,9 +883,7 @@ void printContourFragments(Block *block) {
 
 
 int main(int argc, char **argv) {
-
-    auto prev_time = Time::now();
-    auto prev_time2 = Time::now();
+    auto serial_time = Time::now();
 
     // Parse command line arguments and then read header with GDAL
     readArguments(argc, argv);
@@ -896,6 +907,8 @@ int main(int argc, char **argv) {
             nrows, ncols, nrows - 1, ncols - 1, nblocksv, nblocksh, block_dim, block_dim);
     printf("Levels = %zu intervals of size %.1f from %.1f through %.1f\n",
             levels.size(), interval, levels.front(), levels.back());
+    printf("Douglas-Peucker tolerance: %.2f, Rounds of smoothing: %d\n",
+            simplify_tolerance, rounds_of_smoothing);
     blocks = new Block[nblocksh * nblocksv];
     for (int ii = 0; ii < nblocksv; ii++) {
         for (int jj = 0; jj < nblocksh; jj++) {
@@ -906,67 +919,61 @@ int main(int argc, char **argv) {
             block->num_cols = std::min(block_dim, ncols - 1 - block->first_col);
         }
     }
-    profileTime("0.  Initialization", prev_time);
-    profileTime("Wall time: init", prev_time2);
+    profileTime("Wall time: init", serial_time);
 
     int block_num;
     Block local_block;
-    # pragma omp parallel default(shared) private(block_num, prev_time, local_block)
+    # pragma omp parallel default(shared) private(block_num, local_block)
     {
+        auto prev_time = Time::now();
         # pragma omp for schedule(dynamic) nowait
         for (block_num = 0; block_num < nblocksh * nblocksv; block_num++) {
-            prev_time = Time::now();
             local_block.first_row = (&blocks[block_num])->first_row;
             local_block.first_col = (&blocks[block_num])->first_col;
             local_block.num_rows = (&blocks[block_num])->num_rows;
             local_block.num_cols = (&blocks[block_num])->num_cols;
-            profileTime("1a. Copying block info", prev_time);
             local_block.inbound_segments.clear();
             local_block.interior_segments.clear();
             local_block.inbound_fragments.clear();
             local_block.interior_fragments.clear();
-            profileTime("1b. Clearing maps", prev_time);
+            profileTime("1a. Setup", prev_time);
             // Phase 1
             processBlock(&local_block, levels);
-            // processBlock(&blocks[block_num], levels);
-            profileTime("1c. Segment generation", prev_time);
 
+            // processBlock is timed within itself.
+            prev_time = Time::now();
             // Phase 2
             for (const auto& level : levels) {
                 traverseNonClosedContourFragments(&local_block, level);
-                // traverseNonClosedContourFragments(&blocks[block_num], level);
                 profileTime("2a. Non-closed traversal", prev_time);
+
                 traverseClosedContourFragments(&local_block, level);
-                // traverseClosedContourFragments(&blocks[block_num], level);
                 profileTime("2b. Closed traversal", prev_time);
             }
 
             // Copy local block to array
             blocks[block_num].inbound_fragments = local_block.inbound_fragments;
             blocks[block_num].interior_fragments = local_block.interior_fragments;
-            profileTime("2c. Copying block maps", prev_time);
+            profileTime("2c. Copying maps", prev_time);
             if (DEBUG) printContourFragments(&blocks[block_num]);
         }
     }
-    profileTime("Wall time: phase 1+2", prev_time2);
+    profileTime("Wall time: phase 1+2", serial_time);
 
 
     // Phase 3
     std::vector<std::list<ContourFragment *>> output_contours;
     size_t i;
-    # pragma omp parallel default (shared) private(i, prev_time)
+    # pragma omp parallel default (shared) private(i)
     {
         # pragma omp for schedule(dynamic) nowait
         for (i = 0; i < levels.size(); i++) {
-            prev_time = Time::now();
             const auto& level = levels[i];
             traverseInboundContours(level, &output_contours);
-            profileTime("3a. Inbound traversal", prev_time);
             traverseInteriorContours(level, &output_contours);
-            profileTime("3b. Interior traversal", prev_time);
         }
     }
-    profileTime("Wall time: phase 3", prev_time2);
+    profileTime("Wall time: phase 3", serial_time);
 
     if (skip_writing_output) {
         printf("Skipping writing of output file\n");
@@ -976,7 +983,7 @@ int main(int argc, char **argv) {
         FILE *output_file = fopen(output_filename, "w");
         printGeoJSON(output_file, output_contours);
         fclose(output_file);
-        profileTime("4.  File writing", prev_time);
+        profileTime("4.  File writing", serial_time);
     }
 
     printProfiling();

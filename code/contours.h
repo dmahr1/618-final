@@ -127,7 +127,8 @@ void printGeoJSON(FILE *output,
 Point transformPoint(Point point);
 
 // Profiling and debugging
-void profileTime(std::string message);
+void profileTime(std::string message,
+        std::chrono::time_point<std::chrono::high_resolution_clock> &prev_time);
 void printSegment(val_t level, Segment *segment);
 void printContourFragment(ContourFragment *cf);
 void printContourFragments(Block *block);
